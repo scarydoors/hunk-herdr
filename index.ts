@@ -1,6 +1,17 @@
-import type { ExtensionCommandContext, HunkExtensionAPI } from "hunkdiff/extension";
+import type { ExtensionCommandContext, ExtensionEventContext, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
 import { Bridge, buildPrompt, label, run, type Pane } from "./bridge.ts";
 import { agentConfig } from "./config.ts";
+import { removeThread, threadAtSelection } from "./threads.ts";
+import {
+  ThreadsPane,
+  assignComment,
+  createThread,
+  removeAssignedComment,
+  suggestedThreadTitle,
+  threadBoardSnapshot,
+  threadForComment,
+  updateAssignedComment,
+} from "./threads-pane.tsx";
 
 // 0.22.0's published declarations predate the latest skill docs (API 26).
 // Feature-detect the new status row; keep native dialogs working on API 10+.
@@ -8,6 +19,14 @@ type StatusContext = { statusLine?: { set(item: { id: string; priority?: number;
 type Context = ExtensionCommandContext & StatusContext;
 
 export default function register(hunk: HunkExtensionAPI) {
+  hunk.registerPane({
+    id: "threads",
+    title: "Threads",
+    placement: "right",
+    width: { preferred: 42, min: 28, max: 72, fraction: 0.3 },
+    component: ThreadsPane,
+  });
+
   let bridge: Bridge | undefined;
   let target: Pane | undefined;
   let draft = "";
@@ -23,7 +42,7 @@ export default function register(hunk: HunkExtensionAPI) {
   }
   function badge(ctx: Context, message?: string) {
     ctx.statusLine?.set({ id: "agent", priority: 5, spans: [
-      { text: ` Herdr · ${message || (target ? `${target.name || target.agent} · ${target.agent_status || "unknown"} (last checked)` : "no agent")} · A picker · P prompt ` },
+      { text: ` Herdr · ${message || (target ? `${target.name || target.agent} · ${target.agent_status || "unknown"} (last checked)` : "no agent")} · A picker · P prompt · T threads · X resolve ` },
     ] });
   }
   async function choose(ctx: Context): Promise<void> {
@@ -104,6 +123,67 @@ export default function register(hunk: HunkExtensionAPI) {
     badge(ctx);
     ctx.notify("Temporary agent stopped.");
   }
+  async function resolveThread(ctx: Context): Promise<void> {
+    const before = ctx.review.snapshot();
+    if (!before) return;
+    const match = threadAtSelection(before, ctx.selection);
+    if (match.kind !== "found") {
+      ctx.notify(match.message, match.kind === "ambiguous" ? "warning" : undefined);
+      return;
+    }
+    const count = match.notes.length;
+    const confirmed = await ctx.dialogs.confirm({
+      title: "Resolve this review thread?",
+      body: `Removes ${count} comment${count === 1 ? "" : "s"} in this thread. This cannot be undone.`,
+      confirmLabel: "Resolve thread",
+      cancelLabel: "Leave open",
+    });
+    if (!confirmed) return;
+    const current = ctx.review.snapshot();
+    if (!current || current.generation !== before.generation || current.stateRevision !== before.stateRevision) {
+      ctx.notify("The review changed while confirmation was open; nothing was resolved.", "warning");
+      return;
+    }
+    await removeThread(run, ctx.cwd, before.generation, match.notes);
+    if (alive(ctx)) ctx.notify(`Resolved review thread (${count} comment${count === 1 ? "" : "s"}).`);
+  }
+  async function assignUserComment(note: ExtensionReviewNote, ctx: ExtensionEventContext): Promise<void> {
+    if (note.draft) return;
+    const threads = threadBoardSnapshot().threads;
+    const parentThread = threadForComment(note.parentId);
+    const entries = [...threads]
+      .sort((left, right) => Number(right.id === parentThread?.id) - Number(left.id === parentThread?.id))
+      .map((thread, index) => ({
+        thread,
+        label: `${thread.id === parentThread?.id ? "↳ " : ""}${thread.title} · ${thread.comments.length} comment${thread.comments.length === 1 ? "" : "s"} [${index + 1}]`,
+      }));
+    const create = "+ Create new thread…";
+    const leave = "Leave unassigned";
+    const picked = await ctx.dialogs.select({
+      title: "Assign saved comment to a thread",
+      options: [...entries.map(entry => entry.label), create, leave],
+    });
+    if (!picked || picked === leave) return;
+    let assignedTitle: string;
+    if (picked === create) {
+      const title = await ctx.dialogs.input({
+        title: "New thread title",
+        placeholder: "What unit of work does this comment belong to?",
+        initial: suggestedThreadTitle(note),
+      });
+      if (!title?.trim()) return;
+      assignedTitle = createThread(title, note).title;
+    } else {
+      const entry = entries.find(candidate => candidate.label === picked);
+      if (!entry || !assignComment(entry.thread.id, note)) {
+        ctx.notify("That thread is no longer available; the comment was left unassigned.", "warning");
+        return;
+      }
+      assignedTitle = entry.thread.title;
+    }
+    ctx.panes.open("threads");
+    ctx.notify(`Assigned comment to thread: ${assignedTitle}`);
+  }
   async function menu(ctx: Context): Promise<void> {
     const actions = [
       "Choose agent…", "Prompt agent…", "Check agent status", "Reveal selected agent",
@@ -121,12 +201,15 @@ export default function register(hunk: HunkExtensionAPI) {
       case 6: return stop(ctx);
     }
   }
-  function command(id: string, title: string, action: (ctx: Context) => Promise<void>, key?: string) {
+  function command(id: string, title: string, action: (ctx: Context) => Promise<void>, key?: string, needsHerdr = true) {
     hunk.registerCommand({ id, title, ...(key ? { key } : {}) }, ctx => {
       if (disposed) return;
       if (pending) { ctx.notify("Herdr operation in progress…", "warning"); return; }
       pending = (async () => {
-        try { await client(ctx).caller(); if (alive(ctx)) await action(ctx); }
+        try {
+          if (needsHerdr) await client(ctx).caller();
+          if (alive(ctx)) await action(ctx);
+        }
         catch (error) {
           if (alive(ctx)) {
             badge(ctx, "needs attention");
@@ -138,6 +221,7 @@ export default function register(hunk: HunkExtensionAPI) {
     });
   }
   command("menu", "Herdr: agent actions…", menu, "A");
+  command("threads", "Herdr: toggle threads sidebar", async ctx => ctx.panes.toggle("threads"), "T", false);
   command("pick", "Herdr: choose agent…", choose);
   command("prompt", "Herdr: prompt agent…", prompt, "P");
   command("status", "Herdr: check status", refresh);
@@ -145,6 +229,7 @@ export default function register(hunk: HunkExtensionAPI) {
   command("reveal-temporary", "Herdr: reveal temporary pane", ctx => client(ctx).revealOwned());
   command("hide", "Herdr: hide siblings / zoom Hunk", ctx => client(ctx).zoom(true));
   command("stop", "Herdr: stop temporary agent…", stop);
+  command("resolve-thread", "Herdr: resolve review thread", resolveThread, "X", false);
   hunk.registerCliCommand({ name: "herdr-check", summary: "Check Hunk/Herdr integration without opening the TUI" }, async (_args, ctx) => {
     try {
       const api = new Bridge(ctx.cwd);
@@ -157,8 +242,15 @@ export default function register(hunk: HunkExtensionAPI) {
       return { kind: "exit", code: 1 };
     }
   });
+  hunk.on("note_created", ({ note }, ctx) => assignUserComment(note, ctx));
+  hunk.on("note_edited", ({ note }) => {
+    if (!note.draft) updateAssignedComment(note);
+  });
+  hunk.on("note_changed", ({ kind, note }) => {
+    if (kind === "removed") removeAssignedComment(note.id);
+  });
   hunk.on("startup", (_event, ctx) => {
-    if (process.env.HERDR_ENV === "1") (ctx as typeof ctx & StatusContext).statusLine?.set({ id: "agent", spans: [{ text: " Herdr · A agents · P prompt " }] });
+    if (process.env.HERDR_ENV === "1") (ctx as typeof ctx & StatusContext).statusLine?.set({ id: "agent", spans: [{ text: " Herdr · A agents · P prompt · T threads · X resolve " }] });
   });
   hunk.on("shutdown", async () => {
     disposed = true;

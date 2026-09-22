@@ -10,8 +10,28 @@ Open Hunk in a Herdr pane, then:
 
 - **A** — agent actions: choose an existing agent or create a temporary one.
 - **P** — prompt the selected agent (opens the picker if none is selected).
+- **T** — toggle the session-local Threads sidebar.
+- **X** — resolve the review thread at the current line/hunk.
 - **Extensions → Herdr** commands also expose selection, status, reveal, hide,
-  and stopping the temporary agent. Menu grouping is named `hunk-herdr`.
+  thread controls, and stopping the temporary agent. Menu grouping is named `hunk-herdr`.
+
+## Threads interface experiment
+
+After a user saves a review comment, the extension asks whether to assign it to
+an existing thread, create a new named thread, or leave it unassigned. Replies
+show their parent's assigned thread first, but assignment remains explicit.
+Creating or choosing a thread opens the right-hand Threads sidebar.
+
+Each thread can be expanded or collapsed by clicking its row. Expanded threads
+list their assigned comments; clicking a comment navigates to its source line.
+Assignments and thread names are session-local prototype state: they do not
+change Hunk's native reply relationships and disappear when Hunk exits.
+
+Thread resolution is experimental. Hunk does not currently persist a separate
+resolved state, so resolving removes the root comment and every reply, leaf-first,
+after one confirmation. If no thread is present, or multiple threads share the
+current location, the extension shows a notice and changes nothing. It never opens
+a thread picker.
 
 The picker lists agents from the calling pane's **live workspace**, across tabs,
 with their name/kind, state, pane ID and cwd. It excludes Hunk's own pane. Selecting
@@ -49,6 +69,8 @@ The prompt sent through `herdr agent prompt` includes:
 - Instructions to run **`hunk skill path` and read the returned review skill**.
 - The path resolved by Hunk at submission time.
 - Review cwd and the selected file/hunk at composition time.
+- An explicit instruction to read user-authored review comments and answer relevant
+  ones as replies in their existing threads, not as detached root comments.
 - Your request, unchanged.
 
 Agents are instructed to discover the matching live Hunk session and use its exact
@@ -123,6 +145,8 @@ No changes to your Nix-managed `config.toml` are needed. Optional key remapping:
 [keybindings]
 "hunk-herdr.menu" = "A"
 "hunk-herdr.prompt" = "P"
+"hunk-herdr.threads" = "T"
+"hunk-herdr.resolve-thread" = "X"
 ```
 
 ## Development / publishing later

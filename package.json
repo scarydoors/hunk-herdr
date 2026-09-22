@@ -3,15 +3,28 @@
   "version": "0.1.0",
   "description": "Workspace-scoped Herdr agent picker and prompting for Hunk",
   "type": "module",
-  "hunk": { "extensions": ["./index.ts"], "apiVersion": 10 },
-  "files": ["index.ts", "bridge.ts", "README.md"],
+  "hunk": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "apiVersion": 10
+  },
+  "files": [
+    "index.ts",
+    "bridge.ts",
+    "threads.ts",
+    "threads-pane.tsx",
+    "README.md"
+  ],
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
     "hunkdiff": "0.22.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.0"
   }
 }

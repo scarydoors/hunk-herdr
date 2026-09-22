@@ -52,6 +52,7 @@ export function buildPrompt(skill: string, cwd: string, text: string, selection:
     `Hunk resolved that skill here: ${JSON.stringify(skill)}.`,
     `Review working directory: ${JSON.stringify(cwd)}. Your own cwd may differ.`,
     "Use `hunk session list --json` to locate this review; use its exact session ID for subsequent commands. If multiple sessions match and you cannot identify this window, ask rather than guess.",
+    "IMPORTANT: Read the review's user-authored comments and treat them as requests addressed to you. Reply to each relevant user comment in its existing thread with `hunk session comment add ... --reply-to <note-id>`; do not answer with detached root comments or leave relevant user comments unanswered.",
     "Do not launch the Hunk TUI, restart its daemon, or change Herdr focus/zoom. Stay in the background unless the user asks otherwise.",
     selection.file ? `Selection when the prompt was composed: ${JSON.stringify(selection.file)}${selection.hunk === undefined ? "" : `, hunk ${selection.hunk + 1}`}.` : "",
     "\nUser request:", text,
