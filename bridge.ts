@@ -110,7 +110,7 @@ export class Bridge {
     const caller = await this.caller();
     await this.api(["pane", "zoom", caller.pane_id, on ? "--on" : "--off"]);
   }
-  async spawn(kind: string): Promise<Pane> {
+  async spawn(kind: string, model?: string): Promise<Pane> {
     if (this.owned) throw new Error("A temporary pane already exists. Stop it before creating another.");
     if (!(AGENT_KINDS as readonly string[]).includes(kind)) throw new Error("Unsupported agent kind");
     const caller = await this.caller();
@@ -131,7 +131,7 @@ export class Bridge {
     await this.settleResize();
     await this.zoom(true);
     try {
-      await this.api(["agent", "start", name, "--kind", kind, "--pane", pane.pane_id, "--timeout", "30000"], 35_000);
+      await this.api(["agent", "start", name, "--kind", kind, "--pane", pane.pane_id, "--timeout", "30000", ...(model ? ["--", "--model", model] : [])], 35_000);
       const agent = (await this.agents()).find(a => a.pane_id === pane.pane_id && a.terminal_id === pane.terminal_id);
       if (!agent) throw new Error("Started agent was not found in this workspace");
       this.owned.pane = agent;

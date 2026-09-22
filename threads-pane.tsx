@@ -439,7 +439,7 @@ export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps
       <box style={{ width: "100%", flexDirection: "column", backgroundColor: theme.panel }}>
         <text
           content={state.navigating
-            ? ` Threads · j/k move · P prompt · A agent · Ctrl+R move selected${selection ? " · X resolve group" : ""} · Enter open · Esc return`
+            ? ` Threads · j/k move · P prompt · A agent · Ctrl+R move selected${selection ? ` · X resolve ${selection.kind === "thread" ? "group" : "comment"}` : ""} · Enter open · Esc return`
             : " Threads · Ctrl+T to navigate"}
           style={{ fg: theme.accent, bg: theme.panel }}
         />

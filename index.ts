@@ -1,6 +1,8 @@
 import type { ExtensionCommandContext, ExtensionEventContext, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
 import { Bridge, buildPrompt, label, run, sameAgent, type Pane } from "./bridge.ts";
 import { agentConfig } from "./config.ts";
+import { modelOptions } from "./model-catalog.ts";
+import { isConfigurableAgentKind, loadModelDefaults, saveModelDefaults, type ConfigurableAgentKind, type ModelDefaults } from "./model-defaults.ts";
 import { removeThread, threadAtSelection, threadsForCommentIds } from "./threads.ts";
 import {
   ThreadsPane,
@@ -65,9 +67,40 @@ export default function register(hunk: HunkExtensionAPI) {
   let disposed = false;
   let pending: Promise<void> | undefined;
   let originallyZoomed: boolean | undefined;
+  let modelDefaults = loadModelDefaults();
 
   function client(ctx: Context): Bridge {
     return new Bridge(ctx.cwd);
+  }
+  async function configureModels(ctx: Context): Promise<void> {
+    if (!ctx.keyboardModes.isActive("threads")) {
+      ctx.notify("Focus Threads (Ctrl+T) before configuring agent models.", "warning");
+      return;
+    }
+    const config = agentConfig(hunk.config);
+    const kinds = (["pi", "claude"] as const).filter(kind => config.agents.includes(kind));
+    if (!kinds.length) {
+      ctx.notify("Enable Pi or Claude in the hunk-herdr agents setting first.", "warning");
+      return;
+    }
+    const agents = kinds.map(kind => ({ kind, label: `${kind === "pi" ? "Pi" : "Claude"} · ${modelDefaults[kind] || "default"}` }));
+    const pickedAgent = await ctx.dialogs.select({ title: "Configure agent model defaults", options: [...agents.map(agent => agent.label), "Leave unchanged"] });
+    const agent = agents.find(candidate => candidate.label === pickedAgent);
+    if (!agent || !alive(ctx)) return;
+    const models = modelOptions(agent.kind);
+    if (models.length === 1) {
+      ctx.notify(`No cached ${agent.kind === "pi" ? "Pi" : "Claude"} model catalog is available yet. Start that agent once, then try again.`, "warning");
+      return;
+    }
+    const pickedModel = await ctx.dialogs.select({ title: `Default ${agent.kind === "pi" ? "Pi" : "Claude"} model`, options: [...models.map(model => model.label), "Leave unchanged"] });
+    const model = models.find(candidate => candidate.label === pickedModel);
+    if (!model || !alive(ctx)) return;
+    const next: ModelDefaults = { ...modelDefaults };
+    if (model.model) next[agent.kind] = model.model;
+    else delete next[agent.kind];
+    saveModelDefaults(next);
+    modelDefaults = next;
+    ctx.notify(model.model ? `Default ${agent.kind} model saved: ${model.model}` : `Default ${agent.kind} model cleared.`);
   }
   function selectedGroup(ctx: Context): ReviewThread | undefined {
     const selection = selectedThreadItem();
@@ -139,7 +172,7 @@ export default function register(hunk: HunkExtensionAPI) {
       originallyZoomed ??= layout.zoomed;
       badge(ctx, `starting ${kind} for ${thread.title}…`);
       const endStarting = beginDispatch(thread.id);
-      const ready = api.spawn(kind).finally(endStarting);
+      const ready = api.spawn(kind, isConfigurableAgentKind(kind) ? modelDefaults[kind] : undefined).finally(endStarting);
       // Attach a handler now: the user may cancel the prompt before startup finishes.
       void ready.catch(() => {});
       binding = { bridge: api, owned: true, ready };
@@ -219,7 +252,11 @@ export default function register(hunk: HunkExtensionAPI) {
     const before = ctx.review.snapshot();
     if (!before) return;
     const selected = ctx.keyboardModes.isActive("threads") ? selectedThreadItem() : undefined;
-    if (selected) return resolveSelectedThreadGroup(ctx, before, selected.thread);
+    if (selected) {
+      return selected.kind === "thread" || selected.thread.comments.length === 1
+        ? resolveSelectedThreadGroup(ctx, before, selected.thread)
+        : resolveSelectedThreadComment(ctx, before, selected.thread, selected.comment.id);
+    }
     const match = threadAtSelection(before, ctx.selection);
     if (match.kind !== "found") {
       ctx.notify(match.message, match.kind === "ambiguous" ? "warning" : undefined);
@@ -241,21 +278,17 @@ export default function register(hunk: HunkExtensionAPI) {
     await removeThread(run, ctx.cwd, before.generation, match.notes);
     if (alive(ctx)) ctx.notify(`Resolved review thread (${count} comment${count === 1 ? "" : "s"}).`);
   }
-  async function resolveSelectedThreadGroup(ctx: Context, before: NonNullable<ReturnType<Context["review"]["snapshot"]>>, thread: ReviewThread): Promise<void> {
-    if (threadAgents.has(thread.id)) {
-      ctx.notify("Stop or reassign this group's agent before resolving it.", "warning");
-      return;
-    }
-    const notes = threadsForCommentIds(before, new Set(thread.comments.map(comment => comment.id)));
+  async function resolveSelectedThreadComment(ctx: Context, before: NonNullable<ReturnType<Context["review"]["snapshot"]>>, thread: ReviewThread, commentId: string): Promise<void> {
+    const notes = threadsForCommentIds(before, new Set([commentId]));
     if (!notes.length) {
-      removeThreadGroup(thread.id);
-      ctx.notify(`Removed empty Threads group: ${thread.title}.`);
+      removeAssignedComment(commentId);
+      ctx.notify(`Removed stale comment from Threads group: ${thread.title}.`);
       return;
     }
     const confirmed = await ctx.dialogs.confirm({
-      title: `Resolve Threads group: ${thread.title}?`,
-      body: `Removes this displayed group and ${notes.length} native review comment${notes.length === 1 ? "" : "s"}. This cannot be undone.`,
-      confirmLabel: "Resolve group",
+      title: `Resolve comment in ${thread.title}?`,
+      body: `Removes this native review thread and its ${notes.length} comment${notes.length === 1 ? "" : "s"}. Other comments in the displayed group stay open.`,
+      confirmLabel: "Resolve comment",
       cancelLabel: "Leave open",
     });
     if (!confirmed) return;
@@ -265,6 +298,34 @@ export default function register(hunk: HunkExtensionAPI) {
       return;
     }
     await removeThread(run, ctx.cwd, before.generation, notes);
+    removeAssignedComment(commentId);
+    if (alive(ctx)) ctx.notify(`Resolved comment in Threads group ${thread.title}.`);
+  }
+  async function resolveSelectedThreadGroup(ctx: Context, before: NonNullable<ReturnType<Context["review"]["snapshot"]>>, thread: ReviewThread): Promise<void> {
+    const binding = threadAgent(thread);
+    const notes = threadsForCommentIds(before, new Set(thread.comments.map(comment => comment.id)));
+    if (!notes.length) {
+      if (binding?.owned) await binding.bridge.stop();
+      threadAgents.delete(thread.id);
+      removeThreadGroup(thread.id);
+      ctx.notify(`Removed empty Threads group: ${thread.title}.`);
+      return;
+    }
+    const confirmed = await ctx.dialogs.confirm({
+      title: `Resolve Threads group: ${thread.title}?`,
+      body: `Removes this displayed group and ${notes.length} native review comment${notes.length === 1 ? "" : "s"}${binding?.owned ? ", then closes its temporary agent" : ""}. This cannot be undone.`,
+      confirmLabel: "Resolve group",
+      cancelLabel: "Leave open",
+    });
+    if (!confirmed) return;
+    const current = ctx.review.snapshot();
+    if (!current || current.generation !== before.generation || current.stateRevision !== before.stateRevision) {
+      ctx.notify("The review changed while confirmation was open; nothing was resolved.", "warning");
+      return;
+    }
+    if (binding?.owned) await binding.bridge.stop();
+    await removeThread(run, ctx.cwd, before.generation, notes);
+    threadAgents.delete(thread.id);
     removeThreadGroup(thread.id);
     if (alive(ctx)) ctx.notify(`Resolved Threads group ${thread.title} (${notes.length} comment${notes.length === 1 ? "" : "s"}).`);
   }
@@ -423,6 +484,7 @@ export default function register(hunk: HunkExtensionAPI) {
     if (!ctx.keyboardModes.isActive("threads")) ctx.keyboardModes.enterMode("threads");
   });
   command("pick", "Herdr: choose agent for selected Threads group…", async ctx => { await choose(ctx); });
+  command("models", "Herdr: configure Pi/Claude model defaults…", configureModels, "ctrl+l", false);
   command("prompt", "Herdr: prompt selected Threads group…", prompt, "P");
   command("status", "Herdr: check selected Threads group agent", refresh);
   command("reveal", "Herdr: reveal selected Threads group agent", reveal);

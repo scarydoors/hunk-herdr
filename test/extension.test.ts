@@ -57,7 +57,7 @@ function host(config: Record<string, unknown> = {}) {
 
 test("registers discoverable commands and diagnostic CLI without requiring status-row API", () => {
   const h = host();
-  assert.deepEqual([...h.commands.keys()], ["menu", "threads", "focus-threads", "pick", "prompt", "status", "reveal", "hide", "stop", "resolve-thread", "reassign-thread-group"]);
+  assert.deepEqual([...h.commands.keys()], ["menu", "threads", "focus-threads", "pick", "models", "prompt", "status", "reveal", "hide", "stop", "resolve-thread", "reassign-thread-group"]);
   assert.equal(h.state.cliRegistered, true);
   assert.equal(h.state.paneRegistered, true);
   assert.equal(h.state.keyboardModeRegistered, true);
