@@ -28,6 +28,9 @@ export type ThreadSelection =
   | { readonly kind: "thread"; readonly thread: ReviewThread }
   | { readonly kind: "comment"; readonly thread: ReviewThread; readonly comment: AssignedComment };
 
+export const UNASSIGNED_THREAD_ID = "thread:unassigned";
+export const UNASSIGNED_THREAD_TITLE = "Unassigned";
+
 let board: ThreadBoardSnapshot = { threads: [], navigating: false };
 const listeners = new Set<() => void>();
 
@@ -97,6 +100,23 @@ export function assignComment(threadId: string, note: ExtensionReviewNote): bool
   });
   if (assigned) publish({ ...board, threads });
   return assigned;
+}
+
+/** Assign to the session-wide unassigned group, creating it on first use. */
+export function assignUnassignedThread(note: ExtensionReviewNote): ReviewThread {
+  const existing = board.threads.find(thread => thread.id === UNASSIGNED_THREAD_ID);
+  if (existing) {
+    assignComment(existing.id, note);
+    return threadBoardSnapshot().threads.find(thread => thread.id === UNASSIGNED_THREAD_ID)!;
+  }
+  const thread: ReviewThread = {
+    id: UNASSIGNED_THREAD_ID,
+    title: UNASSIGNED_THREAD_TITLE,
+    expanded: true,
+    comments: [assignedComment(note)],
+  };
+  publish({ ...board, threads: [...board.threads, thread] });
+  return thread;
 }
 
 export function updateAssignedComment(note: ExtensionReviewNote): void {
