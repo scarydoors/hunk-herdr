@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { matchesKey } from "hunkdiff/extension";
 import type { ExtensionCommandContext, ExtensionEventContext, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
 import { Bridge, buildPrompt, label, run, sameAgent, type Pane } from "./bridge.ts";
@@ -214,12 +215,12 @@ export default function register(hunk: HunkExtensionAPI) {
     const binding = threadAgent(thread) ?? await choose(ctx, thread, false);
     if (!binding || !alive(ctx)) return;
     const text = await ctx.dialogs.input({
-      title: `Prompt ${binding.pane?.name || binding.pane?.agent || "starting agent"} · ${modelHint(binding)} · ${thread.title}`,
+      title: `Prompt ${agentName(binding)} · ${modelHint(binding)} · ${thread.title}`,
       placeholder: "Ask about this thread…", initial: drafts.get(thread.id) ?? "",
     });
     if (!text?.trim() || !alive(ctx)) return;
     drafts.set(thread.id, text);
-    const skill = await run("hunk", ["skill", "path"], ctx.cwd);
+    const skill = await binding.bridge.skillPath();
     if (!skill) throw new Error("hunk skill path returned no path. Nothing sent.");
     if (!alive(ctx)) return;
     const payload = buildPrompt(skill, ctx.cwd, text, {
@@ -228,18 +229,32 @@ export default function register(hunk: HunkExtensionAPI) {
       thread: { title: thread.title, comments: thread.comments },
     });
     badge(ctx, `sending ${thread.title}…`);
+    // Herdr's waits are deliberately unbounded, and an agent that never reaches a
+    // matched state never ends them. Watching the turn from inside the command would
+    // therefore hold the single-operation lock for the rest of the session, so the
+    // turn is watched here instead: the group's own spinner reports it, and every
+    // other command — resolving, stopping this agent — stays usable meanwhile.
+    watchDispatch(ctx, thread, binding, payload);
+    ctx.notify(`Sent to ${agentName(binding)}: ${thread.title}.`);
+  }
+  function agentName(binding: ThreadAgent): string {
+    return binding.pane?.name || binding.pane?.agent || "starting agent";
+  }
+  /** Follows one dispatched prompt to completion outside the command that sent it. */
+  function watchDispatch(ctx: Context, thread: ReviewThread, binding: ThreadAgent, payload: string): void {
     const endSending = beginDispatch(thread.id);
-    try {
-      const settled = await binding.bridge.promptWhenReady(await readyAgent(binding), payload);
-      if (["idle", "done"].includes(settled.agent_status || "")) setThreadCompleted(thread.id);
-      drafts.delete(thread.id);
-    } finally {
-      endSending();
-    }
-    if (alive(ctx)) {
-      badge(ctx, `submitted ${thread.title} to ${binding.pane?.name || binding.pane?.agent || "agent"}`);
-      ctx.notify(`Agent completed the prompt for thread: ${thread.title}.`);
-    }
+    void (async () => {
+      try {
+        const settled = await binding.bridge.promptWhenReady(await readyAgent(binding), payload);
+        if (["idle", "done"].includes(settled.agent_status || "")) setThreadCompleted(thread.id);
+        drafts.delete(thread.id);
+        if (alive(ctx)) ctx.notify(`Agent completed the prompt for thread: ${thread.title}.`);
+      } catch (error) {
+        if (alive(ctx)) ctx.notify(`${thread.title}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      } finally {
+        endSending();
+      }
+    })();
   }
   async function refresh(ctx: Context): Promise<void> {
     const thread = selectedGroup(ctx);
@@ -575,7 +590,9 @@ export default function register(hunk: HunkExtensionAPI) {
   });
   hunk.on("shutdown", async () => {
     disposed = true;
-    await pending;
+    // Never let a stuck operation cost the cleanup below: a leaked temporary pane
+    // outlives the session, while abandoning a half-finished command does not.
+    await Promise.race([pending ?? Promise.resolve(), delay(2_000, undefined, { ref: false })]);
     // Host shutdown is bounded: cleanup is best effort, never touch selected existing agents.
     const owned = [...threadAgents.values()].filter(binding => binding.owned);
     await Promise.all(owned.map(async binding => {

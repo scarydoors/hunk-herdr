@@ -216,6 +216,40 @@ test("resolving runs while an agent operation is still in flight", async t => {
   await busy;
 });
 
+test("releases the command lock while the agent's turn is still running", async t => {
+  resetThreadBoard();
+  createThread("Authentication", {
+    id: "user:one", fileId: "runtime:one", filePath: "src/auth.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expiry", draft: false,
+  });
+  startThreadNavigation();
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => [agent]);
+  t.mock.method(Bridge.prototype, "validate", async () => agent);
+  t.mock.method(Bridge.prototype, "skillPath", async () => "/skills/hunk-review.md");
+  // A Herdr wait that never returns is exactly the case that used to strand the lock.
+  let settle!: (pane: Pane) => void;
+  t.mock.method(Bridge.prototype, "promptWhenReady", () => new Promise<Pane>(resolve => { settle = resolve; }));
+  const h = host();
+  h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
+  h.inputs.push("Explain this expiry path");
+  await h.invoke("prompt");
+
+  assert.match(h.notices.at(-1)!, /^Sent to pi: Authentication\.$/);
+  assert.equal(threadBoardSnapshot().threads[0]?.dispatching, true, "the group still reports the running turn");
+
+  // The lock is what used to make every one of these answer "Herdr operation in progress…".
+  await h.invoke("resolve-thread");
+  await h.invoke("status");
+  assert.ok(!h.notices.includes("Herdr operation in progress…"));
+
+  settle({ ...agent, agent_status: "idle" });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(threadBoardSnapshot().threads[0]?.dispatching, false);
+  assert.equal(threadBoardSnapshot().threads[0]?.completed, true);
+  assert.match(h.notices.at(-1)!, /Agent completed the prompt for thread: Authentication/);
+});
+
 test("cancelled picker never spawns or prompts", async t => {
   resetThreadBoard();
   createThread("Authentication", {

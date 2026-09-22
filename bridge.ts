@@ -140,6 +140,10 @@ export class Bridge {
       throw new Error(`${error instanceof Error ? error.message : error}. Temporary pane ${pane.pane_id} retained; use Reveal temporary pane to handle startup or Stop temporary agent to discard it. No prompt was sent.`);
     }
   }
+  /** The one call that runs `hunk` rather than `herdr`; kept here so every child process is mockable in one place. */
+  async skillPath(): Promise<string> {
+    return this.exec("hunk", ["skill", "path"], this.cwd);
+  }
   async reveal(target: Pane): Promise<void> {
     const agent = await this.validate(target);
     const caller = await this.caller();
