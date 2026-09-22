@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionReviewSelection, ExtensionReviewSnapshot, ExtensionReviewSnapshotNote } from "hunkdiff/extension";
-import { removeThread, threadAtSelection } from "../threads.ts";
+import { removeThread, threadAtSelection, threadsForCommentIds } from "../threads.ts";
 import type { Run } from "../bridge.ts";
 
 function note(id: string, options: { parentId?: string; line?: number; hunk?: number } = {}): ExtensionReviewSnapshotNote {
@@ -52,6 +52,13 @@ test("refuses an ambiguous location without selecting a thread", () => {
 test("falls back to the selected hunk when no exact line matches", () => {
   const match = threadAtSelection(snapshot([note("root", { line: 18 })]), selection(12));
   assert.equal(match.kind, "found");
+});
+
+test("expands displayed-group comment IDs to complete native threads", () => {
+  const root = note("root");
+  const reply = note("reply", { parentId: "root" });
+  const other = note("other", { line: 20 });
+  assert.deepEqual(threadsForCommentIds(snapshot([root, reply, other]), new Set(["reply"])).map(item => item.id), ["reply", "root"]);
 });
 
 test("removes a thread through the exact live session in supplied order", async () => {

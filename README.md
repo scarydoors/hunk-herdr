@@ -22,8 +22,9 @@ Open Hunk in a Herdr pane, then:
 After a user saves a review comment, the extension asks whether to assign it to
 an existing thread, create a new named thread, or assign it to the session-wide
 **Unassigned** group. Escaping or cancelling the selector also places the comment
-in Unassigned. The selector starts on the thread chosen last; after creating a
-thread, that newly created thread becomes the next default.
+in Unassigned. Only root review comments are assignable; native replies remain in
+their root conversation. The selector starts on the thread chosen last; after
+creating a thread, that newly created thread becomes the next default.
 Creating or choosing a thread opens the right-hand Threads sidebar.
 
 Each thread can be expanded or collapsed by clicking its row. Expanded threads
@@ -34,19 +35,28 @@ and Enter expands a thread or jumps to a selected comment. With a group selected
 actions. The picker can select any eligible running agent in the current workspace
 (and matching worktree cwd when available), or start a new temporary agent. Agents
 started by this extension are labeled with their assigned group when shown in a
-later picker. Each prompt includes an authoritative list of that group's comment
+later picker. A spinning indicator on a group means Herdr is starting its agent or
+sending it work; after Herdr observes its response, the indicator becomes a green
+checkmark. When creating an agent for **P**, the prompt field opens while it starts
+and delivery waits in the background. Each prompt includes an authoritative list of that group's comment
 IDs and explicitly prohibits acting on any other review comments. Press **Ctrl+R** on
-either a thread or one of its comments to move that entire displayed group into
-**Unassigned**, another thread, or a new named thread. **T** only changes sidebar
-visibility, while Esc only leaves keyboard navigation.
+a thread heading to move the whole displayed group, or on a comment to move only
+that comment, into **Unassigned**, another thread, or a new named thread. With a
+Threads item selected, **X** confirms resolving that displayed group and its native
+review comments. **T** only changes sidebar visibility, while Esc only leaves
+keyboard navigation.
 Assignments and thread names are session-local prototype state: they do not
 change Hunk's native reply relationships and disappear when Hunk exits.
 
-Thread resolution is experimental. Hunk does not currently persist a separate
-resolved state, so resolving removes the root comment and every reply, leaf-first,
-after one confirmation. If no thread is present, or multiple threads share the
-current location, the extension shows a notice and changes nothing. It never opens
-a thread picker.
+Thread resolution is experimental. When the review cursor is on one assigned native
+root comment, a bottom-screen hint shows **X resolve native review thread**. Hunk
+does not currently persist a separate resolved state, so resolving removes the root
+comment
+and every reply, leaf-first,
+after one confirmation. In Threads navigation, **X** instead resolves every native
+thread represented by the selected displayed group, then removes that group. If no
+thread is present, or multiple threads share the current location, the extension
+shows a notice and changes nothing.
 
 The picker lists agents from the calling pane's **live workspace**, across tabs,
 with their name/kind, state, pane ID and cwd. It excludes Hunk's own pane. Selecting

@@ -4,12 +4,16 @@ import type { ExtensionReviewNote } from "hunkdiff/extension";
 import {
   assignComment,
   createThread,
+  createThreadFromComment,
   createThreadFromGroup,
+  moveComment,
   moveThreadComments,
   moveThreadSelection,
   removeAssignedComment,
   resetThreadBoard,
   selectedThreadItem,
+  setThreadCompleted,
+  setThreadDispatching,
   startThreadNavigation,
   stopThreadNavigation,
   suggestedThreadTitle,
@@ -65,6 +69,35 @@ test("moves a whole displayed group to an existing or new thread", () => {
   assert.equal(renamed?.title, "Authentication tests");
   assert.deepEqual(renamed?.comments.map(comment => comment.id), ["three", "one", "two"]);
   assert.deepEqual(threadBoardSnapshot().threads.map(thread => thread.title), ["Authentication tests"]);
+});
+
+test("moves only the selected comment when splitting a displayed group", () => {
+  resetThreadBoard();
+  const source = createThread("Authentication", note("one", "Check auth handling"));
+  assignComment(source.id, note("two", "Add a regression test"));
+  const target = createThread("Tests", note("three", "Exercise failures"));
+  const moved = moveComment(source.id, "two", target.id);
+  assert.deepEqual(moved?.comments.map(comment => comment.id), ["three", "two"]);
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => thread.comments.map(comment => comment.id)), [["one"], ["three", "two"]]);
+
+  const created = createThreadFromComment(source.id, "one", "Authentication tests");
+  assert.equal(created?.title, "Authentication tests");
+  assert.deepEqual(created?.comments.map(comment => comment.id), ["one"]);
+});
+
+test("marks a group as dispatching while Herdr starts or sends its agent", () => {
+  resetThreadBoard();
+  const created = createThread("Authentication", note("one", "Check auth handling"));
+  setThreadDispatching(created.id, true);
+  assert.equal(threadBoardSnapshot().threads[0]?.dispatching, true);
+  setThreadDispatching(created.id, false);
+  setThreadCompleted(created.id);
+  assert.deepEqual(threadBoardSnapshot().threads[0] && {
+    dispatching: threadBoardSnapshot().threads[0].dispatching,
+    completed: threadBoardSnapshot().threads[0].completed,
+  }, { dispatching: false, completed: true });
+  setThreadDispatching(created.id, true);
+  assert.equal(threadBoardSnapshot().threads[0]?.completed, false);
 });
 
 test("updates and removes assigned comments without deleting the thread", () => {
