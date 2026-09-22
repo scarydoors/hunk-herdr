@@ -148,3 +148,16 @@ test("payload includes skill discovery, full user text, cwd and selection", () =
   assert.ok(payload.includes("do not answer with detached root comments"));
   assert.ok(payload.endsWith(text));
 });
+
+test("thread-scoped payload identifies the complete allowed comment set", () => {
+  const payload = buildPrompt("/skill.md", "/review", "Investigate", {
+    thread: {
+      title: "Authentication",
+      comments: [{ id: "user:one", body: "Handle expiry", filePath: "src/auth.ts", side: "new", line: 12 }],
+    },
+  });
+  assert.match(payload, /THREAD SCOPE \(authoritative\): "Authentication"/);
+  assert.match(payload, /"id":"user:one"/);
+  assert.match(payload, /Do not reply to, create comments for, resolve, or otherwise act on any review comment outside this list/);
+  assert.doesNotMatch(payload, /Read the review's user-authored comments and treat them as requests/);
+});

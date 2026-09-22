@@ -1,28 +1,30 @@
 import type { ExtensionCommandContext, ExtensionEventContext, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
-import { Bridge, buildPrompt, label, run, type Pane } from "./bridge.ts";
+import { Bridge, buildPrompt, label, run, sameAgent, type Pane } from "./bridge.ts";
 import { agentConfig } from "./config.ts";
 import { removeThread, threadAtSelection } from "./threads.ts";
 import {
   ThreadsPane,
   activateSelectedThreadItem,
+  type ReviewThread,
   assignComment,
   assignUnassignedThread,
   createThread,
+  createThreadFromGroup,
+  moveThreadComments,
+  moveThreadToUnassigned,
+  selectedThreadItem,
   UNASSIGNED_THREAD_ID,
   UNASSIGNED_THREAD_TITLE,
   moveThreadSelection,
   removeAssignedComment,
   startThreadNavigation,
   stopThreadNavigation,
-  suggestedThreadTitle,
+  updateThreadCommentNavigation,
   threadBoardSnapshot,
   updateAssignedComment,
 } from "./threads-pane.tsx";
 
-// 0.22.0's published declarations predate the latest skill docs (API 26).
-// Feature-detect the new status row; keep native dialogs working on API 10+.
-type StatusContext = { statusLine?: { set(item: { id: string; priority?: number; spans: { text: string }[] }): void } };
-type Context = ExtensionCommandContext & StatusContext;
+type Context = ExtensionCommandContext;
 
 export default function register(hunk: HunkExtensionAPI) {
   hunk.registerPane({
@@ -49,41 +51,57 @@ export default function register(hunk: HunkExtensionAPI) {
     },
   });
 
-  let bridge: Bridge | undefined;
-  let target: Pane | undefined;
+  type ThreadAgent = { pane: Pane; bridge: Bridge; owned: boolean };
+  const threadAgents = new Map<string, ThreadAgent>();
+  const drafts = new Map<string, string>();
   let preferredThreadId = UNASSIGNED_THREAD_ID;
-  let draft = "";
   let disposed = false;
   let pending: Promise<void> | undefined;
   let originallyZoomed: boolean | undefined;
 
   function client(ctx: Context): Bridge {
-    return bridge ??= new Bridge(ctx.cwd);
+    return new Bridge(ctx.cwd);
+  }
+  function selectedGroup(ctx: Context): ReviewThread | undefined {
+    const selection = selectedThreadItem();
+    if (!selection) ctx.notify("Focus a Threads group or comment first (Ctrl+T).", "warning");
+    return selection?.thread;
+  }
+  function threadAgent(thread: ReviewThread): ThreadAgent | undefined {
+    return threadAgents.get(thread.id);
+  }
+  function agentLabel(agent: Pane): string {
+    const binding = [...threadAgents.entries()].find(([, value]) => sameAgent(value.pane, agent));
+    const thread = binding && threadBoardSnapshot().threads.find(candidate => candidate.id === binding[0]);
+    return `${label(agent)}${thread ? ` · assigned to ${thread.title}` : ""}`;
   }
   function alive(ctx: Context): boolean {
     return !disposed && ctx.review.snapshot() !== null;
   }
-  function badge(ctx: Context, message?: string) {
-    ctx.statusLine?.set({ id: "agent", priority: 5, spans: [
-      { text: ` Herdr · ${message || (target ? `${target.name || target.agent} · ${target.agent_status || "unknown"} (last checked)` : "no agent")} · A picker · P prompt · T threads · X resolve ` },
-    ] });
-  }
-  async function choose(ctx: Context): Promise<void> {
+  // Agent state is shown in the Threads pane and dialogs, not a persistent status row.
+  function badge(_ctx: Context, _message?: string) {}
+  async function choose(ctx: Context, thread = selectedGroup(ctx)): Promise<void> {
+    if (!thread) return;
+    if (threadAgent(thread)?.owned) {
+      ctx.notify("Stop this group's temporary agent before choosing a replacement.", "warning");
+      return;
+    }
     const api = client(ctx);
     const config = agentConfig(hunk.config);
-    const agents = (await api.agents()).filter(a => config.agents.some(kind => kind === a.agent));
+    const agents = (await api.agents()).filter(agent => config.agents.some(kind => kind === agent.agent)
+      && (!(agent.foreground_cwd || agent.cwd) || (agent.foreground_cwd || agent.cwd) === ctx.cwd));
     if (!alive(ctx)) return;
     const create = "+ Create temporary agent (hidden sibling)";
-    const options = agents.map(a => `${target && a.pane_id === target.pane_id ? "● " : "○ "}${label(a)}`);
+    const options = agents.map(agent => `${threadAgent(thread)?.pane.pane_id === agent.pane_id ? "● " : "○ "}${agentLabel(agent)}`);
     const picked = await ctx.dialogs.select({
-      title: "Herdr · agents in this workspace",
+      title: `Herdr · agent for ${thread.title}`,
       options: [...options, ...(config.agents.length ? [create] : []), "Leave unchanged"],
     });
     if (!picked || picked === "Leave unchanged" || !alive(ctx)) return;
+    let binding: ThreadAgent;
     if (picked === create) {
-      if (api.owned) throw new Error("A temporary pane already exists. Use Reveal temporary pane or Stop temporary agent first.");
       const kind = await ctx.dialogs.select({
-        title: `Temporary agent · choose kind${config.defaultAgent ? ` (default: ${config.defaultAgent})` : ""}`,
+        title: `Temporary agent for ${thread.title} · choose kind${config.defaultAgent ? ` (default: ${config.defaultAgent})` : ""}`,
         options: [...config.agents, "Leave unchanged"],
       });
       if (!kind || kind === "Leave unchanged" || !alive(ctx)) return;
@@ -92,59 +110,68 @@ export default function register(hunk: HunkExtensionAPI) {
       const layout = await api.layout(caller);
       if (!alive(ctx)) return;
       originallyZoomed ??= layout.zoomed;
-      badge(ctx, `starting ${kind}…`);
-      target = await api.spawn(kind);
-      if (alive(ctx)) ctx.notify("Temporary agent ready. Hunk stays zoomed; use Reveal to see it.");
+      badge(ctx, `starting ${kind} for ${thread.title}…`);
+      binding = { pane: await api.spawn(kind), bridge: api, owned: true };
+      if (alive(ctx)) ctx.notify(`Temporary agent ready for ${thread.title}. Hunk stays zoomed; use Reveal to see it.`);
     } else {
-      target = await api.validate(agents[options.indexOf(picked)]!);
+      binding = { pane: await api.validate(agents[options.indexOf(picked)]!), bridge: api, owned: false };
     }
+    threadAgents.set(thread.id, binding);
     if (alive(ctx)) badge(ctx);
   }
   async function prompt(ctx: Context): Promise<void> {
-    if (!target) await choose(ctx);
-    if (!target || !alive(ctx)) return;
+    const thread = selectedGroup(ctx);
+    if (!thread) return;
+    if (!threadAgent(thread)) await choose(ctx, thread);
+    const binding = threadAgent(thread);
+    if (!binding || !alive(ctx)) return;
     const text = await ctx.dialogs.input({
-      title: `Prompt ${target.name || target.agent}`,
-      placeholder: "Ask about this review…", initial: draft,
+      title: `Prompt ${binding.pane.name || binding.pane.agent} · ${thread.title}`,
+      placeholder: "Ask about this thread…", initial: drafts.get(thread.id) ?? "",
     });
     if (!text?.trim() || !alive(ctx)) return;
-    draft = text;
+    drafts.set(thread.id, text);
     const skill = await run("hunk", ["skill", "path"], ctx.cwd);
     if (!skill) throw new Error("hunk skill path returned no path. Nothing sent.");
     if (!alive(ctx)) return;
     const payload = buildPrompt(skill, ctx.cwd, text, {
       file: ctx.selection.file?.path,
       hunk: ctx.selection.hunkIndex ?? undefined,
+      thread: { title: thread.title, comments: thread.comments },
     });
-    badge(ctx, "sending…");
-    await client(ctx).prompt(target, payload);
-    draft = "";
+    badge(ctx, `sending ${thread.title}…`);
+    await binding.bridge.prompt(binding.pane, payload);
+    drafts.delete(thread.id);
     if (alive(ctx)) {
-      badge(ctx, `submitted to ${target.name || target.agent}`);
-      ctx.notify("Prompt submitted with Hunk skill instructions (completion not yet checked).");
+      badge(ctx, `submitted ${thread.title} to ${binding.pane.name || binding.pane.agent}`);
+      ctx.notify(`Prompt submitted for thread: ${thread.title} (completion not yet checked).`);
     }
   }
   async function refresh(ctx: Context): Promise<void> {
-    if (!target) return choose(ctx);
-    target = await client(ctx).validate(target);
-    if (alive(ctx)) { badge(ctx); ctx.notify(label(target)); }
+    const thread = selectedGroup(ctx);
+    const binding = thread && threadAgent(thread);
+    if (!thread || !binding) return choose(ctx, thread);
+    binding.pane = await binding.bridge.validate(binding.pane);
+    if (alive(ctx)) { badge(ctx); ctx.notify(agentLabel(binding.pane)); }
   }
   async function reveal(ctx: Context): Promise<void> {
-    if (!target) return choose(ctx);
-    await client(ctx).reveal(target);
+    const thread = selectedGroup(ctx);
+    const binding = thread && threadAgent(thread);
+    if (!thread || !binding) return choose(ctx, thread);
+    await binding.bridge.reveal(binding.pane);
   }
   async function stop(ctx: Context): Promise<void> {
-    const api = client(ctx);
-    if (!api.owned) { ctx.notify("No temporary agent owned by this Hunk session."); return; }
+    const thread = selectedGroup(ctx);
+    const binding = thread && threadAgent(thread);
+    if (!thread || !binding?.owned) { ctx.notify("This thread has no temporary agent owned by this Hunk session."); return; }
     if (!await ctx.dialogs.confirm({
-      title: "Stop temporary agent?", body: "Closes its sibling pane and terminates any running work. Existing agents are never closed.",
+      title: `Stop temporary agent for ${thread.title}?`, body: "Closes its sibling pane and terminates any running work. Existing agents are never closed.",
       confirmLabel: "Stop agent", cancelLabel: "Leave running",
     }) || !alive(ctx)) return;
-    const paneId = api.owned.pane.pane_id;
-    await api.stop();
-    if (target?.pane_id === paneId) target = undefined;
+    await binding.bridge.stop();
+    threadAgents.delete(thread.id);
     badge(ctx);
-    ctx.notify("Temporary agent stopped.");
+    ctx.notify(`Temporary agent stopped for ${thread.title}.`);
   }
   async function resolveThread(ctx: Context): Promise<void> {
     const before = ctx.review.snapshot();
@@ -200,7 +227,6 @@ export default function register(hunk: HunkExtensionAPI) {
       const title = await ctx.dialogs.input({
         title: "New thread title",
         placeholder: "What unit of work does this comment belong to?",
-        initial: suggestedThreadTitle(note),
       });
       if (!title?.trim()) {
         assignedTitle = assignUnassignedThread(note).title;
@@ -222,21 +248,65 @@ export default function register(hunk: HunkExtensionAPI) {
     ctx.panes.open("threads");
     ctx.notify(`Assigned comment to thread: ${assignedTitle}`);
   }
+  async function reassignSelectedGroup(ctx: Context): Promise<void> {
+    const selection = selectedThreadItem();
+    if (!selection) {
+      ctx.notify("Focus a Threads group or comment first (Ctrl+T).", "warning");
+      return;
+    }
+    const source = selection.thread;
+    if (threadAgents.has(source.id)) {
+      ctx.notify("Stop or reassign this group's agent before moving its comments.", "warning");
+      return;
+    }
+    const entries = threadBoardSnapshot().threads
+      .filter(thread => thread.id !== source.id && thread.id !== UNASSIGNED_THREAD_ID)
+      .map((thread, index) => ({
+        thread,
+        label: `${thread.title} · ${thread.comments.length} comment${thread.comments.length === 1 ? "" : "s"} [${index + 1}]`,
+      }));
+    const create = "+ Create new thread…";
+    const unassigned = UNASSIGNED_THREAD_TITLE;
+    const picked = await ctx.dialogs.select({
+      title: `Move ${source.comments.length} comment${source.comments.length === 1 ? "" : "s"} from ${source.title}`,
+      options: [unassigned, ...entries.map(entry => entry.label), create, "Leave unchanged"],
+    });
+    if (!picked || picked === "Leave unchanged" || !alive(ctx)) return;
+    let destination;
+    if (picked === unassigned) {
+      destination = moveThreadToUnassigned(source.id);
+    } else if (picked === create) {
+      const title = await ctx.dialogs.input({
+        title: "New thread title",
+        placeholder: "What unit of work do these comments belong to?",
+      });
+      if (!title?.trim() || !alive(ctx)) return;
+      destination = createThreadFromGroup(source.id, title);
+    } else {
+      const entry = entries.find(candidate => candidate.label === picked);
+      destination = entry ? moveThreadComments(source.id, entry.thread.id) : undefined;
+    }
+    if (!destination) {
+      ctx.notify("That thread is no longer available; the group was not moved.", "warning");
+      return;
+    }
+    preferredThreadId = destination.id;
+    ctx.panes.open("threads");
+    ctx.notify(`Moved ${source.comments.length} comment${source.comments.length === 1 ? "" : "s"} to thread: ${destination.title}`);
+  }
   async function menu(ctx: Context): Promise<void> {
-    const actions = [
-      "Choose agent…", "Prompt agent…", "Check agent status", "Reveal selected agent",
-      "Reveal temporary pane (including startup dialogs)", "Hide siblings / zoom Hunk", "Stop temporary agent…", "Leave unchanged",
-    ];
-    const picked = await ctx.dialogs.select({ title: `Herdr · ${target ? target.name || target.agent : "pick an agent"}`, options: actions });
+    const thread = selectedGroup(ctx);
+    if (!thread) return;
+    const actions = ["Choose agent…", "Prompt agent…", "Check agent status", "Reveal thread agent", "Hide siblings / zoom Hunk", "Stop temporary agent…", "Leave unchanged"];
+    const picked = await ctx.dialogs.select({ title: `Herdr · ${thread.title}`, options: actions });
     if (!picked || !alive(ctx)) return;
     switch (actions.indexOf(picked)) {
-      case 0: return choose(ctx);
+      case 0: return choose(ctx, thread);
       case 1: return prompt(ctx);
       case 2: return refresh(ctx);
       case 3: return reveal(ctx);
-      case 4: return client(ctx).revealOwned();
-      case 5: return client(ctx).zoom(true);
-      case 6: return stop(ctx);
+      case 4: return client(ctx).zoom(true);
+      case 5: return stop(ctx);
     }
   }
   function command(id: string, title: string, action: (ctx: Context) => Promise<void>, key?: string, needsHerdr = true) {
@@ -278,14 +348,14 @@ export default function register(hunk: HunkExtensionAPI) {
     }
     if (!ctx.keyboardModes.isActive("threads")) ctx.keyboardModes.enterMode("threads");
   });
-  command("pick", "Herdr: choose agent…", choose);
-  command("prompt", "Herdr: prompt agent…", prompt, "P");
-  command("status", "Herdr: check status", refresh);
-  command("reveal", "Herdr: reveal selected agent", reveal);
-  command("reveal-temporary", "Herdr: reveal temporary pane", ctx => client(ctx).revealOwned());
+  command("pick", "Herdr: choose agent for selected Threads group…", choose);
+  command("prompt", "Herdr: prompt selected Threads group…", prompt, "P");
+  command("status", "Herdr: check selected Threads group agent", refresh);
+  command("reveal", "Herdr: reveal selected Threads group agent", reveal);
   command("hide", "Herdr: hide siblings / zoom Hunk", ctx => client(ctx).zoom(true));
-  command("stop", "Herdr: stop temporary agent…", stop);
+  command("stop", "Herdr: stop selected Threads group agent…", stop);
   command("resolve-thread", "Herdr: resolve review thread", resolveThread, "X", false);
+  command("reassign-thread-group", "Herdr: reassign selected Threads group…", reassignSelectedGroup, "ctrl+r", false);
   hunk.registerCliCommand({ name: "herdr-check", summary: "Check Hunk/Herdr integration without opening the TUI" }, async (_args, ctx) => {
     try {
       const api = new Bridge(ctx.cwd);
@@ -304,21 +374,21 @@ export default function register(hunk: HunkExtensionAPI) {
   });
   hunk.on("note_changed", ({ kind, note }) => {
     if (kind === "removed") removeAssignedComment(note.id);
-  });
-  hunk.on("startup", (_event, ctx) => {
-    if (process.env.HERDR_ENV === "1") (ctx as typeof ctx & StatusContext).statusLine?.set({ id: "agent", spans: [{ text: " Herdr · A agents · P prompt · T threads · X resolve " }] });
+    else updateThreadCommentNavigation(note.id, note.anchor.preferred);
   });
   hunk.on("shutdown", async () => {
     disposed = true;
     await pending;
-    if (!bridge) return;
-    // Host shutdown is bounded: cleanup is best effort, never touch existing agents.
-    try { await bridge.stop(); } catch (error) { hunk.log(`Temporary pane cleanup: ${String(error)}`); }
-    if (originallyZoomed === false) {
+    // Host shutdown is bounded: cleanup is best effort, never touch selected existing agents.
+    const owned = [...threadAgents.values()].filter(binding => binding.owned);
+    await Promise.all(owned.map(async binding => {
+      try { await binding.bridge.stop(); } catch (error) { hunk.log(`Temporary pane cleanup: ${String(error)}`); }
+    }));
+    if (originallyZoomed === false && owned[0]) {
       try {
-        const caller = await bridge.caller();
-        const layout = await bridge.layout(caller);
-        if (layout.zoomed && layout.focused_pane_id === caller.pane_id) await bridge.zoom(false);
+        const caller = await owned[0].bridge.caller();
+        const layout = await owned[0].bridge.layout(caller);
+        if (layout.zoomed && layout.focused_pane_id === caller.pane_id) await owned[0].bridge.zoom(false);
       } catch {}
     }
   });

@@ -57,7 +57,7 @@ function host(config: Record<string, unknown> = {}) {
 
 test("registers discoverable commands and diagnostic CLI without requiring status-row API", () => {
   const h = host();
-  assert.deepEqual([...h.commands.keys()], ["menu", "threads", "focus-threads", "pick", "prompt", "status", "reveal", "reveal-temporary", "hide", "stop", "resolve-thread"]);
+  assert.deepEqual([...h.commands.keys()], ["menu", "threads", "focus-threads", "pick", "prompt", "status", "reveal", "hide", "stop", "resolve-thread", "reassign-thread-group"]);
   assert.equal(h.state.cliRegistered, true);
   assert.equal(h.state.paneRegistered, true);
   assert.equal(h.state.keyboardModeRegistered, true);
@@ -103,6 +103,24 @@ test("cancelling assignment puts the comment in Unassigned", async () => {
   };
   await h.emit("note_created", { note });
   assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]), [["Unassigned", 1]]);
+});
+
+test("reassigns the selected Threads group through the pane command", async () => {
+  resetThreadBoard();
+  const h = host();
+  const first: ExtensionReviewNote = {
+    id: "user:one", fileId: "runtime:one", filePath: "src/one.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expired credentials", draft: false,
+  };
+  h.answers.push("+ Create new thread…", "+ Create new thread…");
+  h.inputs.push("Authentication", "Tests");
+  await h.emit("note_created", { note: first });
+  await h.emit("note_created", { note: { ...first, id: "user:two", body: "Add a refresh test" } });
+  await h.invoke("focus-threads");
+  h.answers.push("Tests · 1 comment [1]");
+  await h.invoke("reassign-thread-group");
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]), [["Tests", 2]]);
+  assert.match(h.notices.at(-1)!, /Moved 1 comment to thread: Tests/);
 });
 
 test("cancelled picker never spawns or prompts", async t => {
