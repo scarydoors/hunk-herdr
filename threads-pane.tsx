@@ -20,9 +20,15 @@ export interface ReviewThread {
 
 export interface ThreadBoardSnapshot {
   readonly threads: readonly ReviewThread[];
+  readonly navigating: boolean;
+  readonly selectedKey?: string;
 }
 
-let board: ThreadBoardSnapshot = { threads: [] };
+export type ThreadSelection =
+  | { readonly kind: "thread"; readonly thread: ReviewThread }
+  | { readonly kind: "comment"; readonly thread: ReviewThread; readonly comment: AssignedComment };
+
+let board: ThreadBoardSnapshot = { threads: [], navigating: false };
 const listeners = new Set<() => void>();
 
 function publish(next: ThreadBoardSnapshot) {
@@ -74,7 +80,7 @@ export function createThread(title: string, note: ExtensionReviewNote): ReviewTh
     expanded: true,
     comments: [assignedComment(note)],
   };
-  publish({ threads: [...board.threads, thread] });
+  publish({ ...board, threads: [...board.threads, thread] });
   return thread;
 }
 
@@ -89,7 +95,7 @@ export function assignComment(threadId: string, note: ExtensionReviewNote): bool
     assigned = true;
     return { ...thread, expanded: true, comments: [...without, comment] };
   });
-  if (assigned) publish({ threads });
+  if (assigned) publish({ ...board, threads });
   return assigned;
 }
 
@@ -104,7 +110,7 @@ export function updateAssignedComment(note: ExtensionReviewNote): void {
     comments[index] = comment;
     return { ...thread, comments };
   });
-  if (changed) publish({ threads });
+  if (changed) publish({ ...board, threads });
 }
 
 export function removeAssignedComment(noteId: string): void {
@@ -115,11 +121,49 @@ export function removeAssignedComment(noteId: string): void {
     changed = true;
     return { ...thread, comments };
   });
-  if (changed) publish({ threads });
+  if (changed) publish({ ...board, threads });
+}
+
+function selections(): ThreadSelection[] {
+  return board.threads.flatMap(thread => [
+    { kind: "thread" as const, thread },
+    ...(thread.expanded ? thread.comments.map(comment => ({ kind: "comment" as const, thread, comment })) : []),
+  ]);
+}
+
+function selectionKey(selection: ThreadSelection): string {
+  return selection.kind === "thread"
+    ? `thread:${selection.thread.id}`
+    : `comment:${selection.thread.id}:${selection.comment.id}`;
+}
+
+export function selectedThreadItem(): ThreadSelection | undefined {
+  return selections().find(selection => selectionKey(selection) === board.selectedKey);
+}
+
+export function startThreadNavigation(): boolean {
+  const first = selections()[0];
+  if (!first) return false;
+  publish({ ...board, navigating: true, selectedKey: board.selectedKey ?? selectionKey(first) });
+  return true;
+}
+
+export function stopThreadNavigation(): void {
+  if (board.navigating || board.selectedKey) publish({ ...board, navigating: false, selectedKey: undefined });
+}
+
+export function moveThreadSelection(delta: number): boolean {
+  const items = selections();
+  if (!items.length) return false;
+  const current = items.findIndex(item => selectionKey(item) === board.selectedKey);
+  const index = (Math.max(0, current) + delta + items.length) % items.length;
+  publish({ ...board, selectedKey: selectionKey(items[index]!) });
+  return true;
 }
 
 export function toggleThread(threadId: string): void {
   publish({
+    ...board,
     threads: board.threads.map(thread => thread.id === threadId
       ? { ...thread, expanded: !thread.expanded }
       : thread),
@@ -127,7 +171,7 @@ export function toggleThread(threadId: string): void {
 }
 
 export function resetThreadBoard(): void {
-  publish({ threads: [] });
+  publish({ threads: [], navigating: false });
 }
 
 function oneLine(text: string, width: number): string {
@@ -135,9 +179,33 @@ function oneLine(text: string, width: number): string {
   return normalized.length > width ? `${normalized.slice(0, Math.max(1, width - 1))}…` : normalized;
 }
 
+let revealSelectedComment: (() => void) | undefined;
+
+function revealComment(comment: AssignedComment, files: ExtensionPaneProps["files"], actions: ExtensionPaneProps["actions"]): void {
+  const file = files.find(candidate => candidate.path === comment.filePath);
+  if (!file) {
+    actions.notify(`Comment file is not visible: ${comment.filePath}`, "warning");
+    return;
+  }
+  actions.revealLine(file.id, comment.side, comment.line);
+}
+
+/** Activates the keyboard-selected row; threads expand/collapse and comments reveal their source. */
+export function activateSelectedThreadItem(): boolean {
+  const selection = selectedThreadItem();
+  if (!selection) return false;
+  if (selection.kind === "thread") toggleThread(selection.thread.id);
+  else revealSelectedComment?.();
+  return true;
+}
+
 /** Session-local prototype UI for grouping saved user comments into orchestration threads. */
 export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps): ReactNode {
   const state = useThreadBoard();
+  const selection = selectedThreadItem();
+  revealSelectedComment = selection?.kind === "comment"
+    ? () => revealComment(selection.comment, files, actions)
+    : undefined;
   return (
     <scrollbox
       width="100%"
@@ -152,7 +220,10 @@ export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps
       horizontalScrollbarOptions={{ visible: false }}
     >
       <box style={{ width: "100%", flexDirection: "column", backgroundColor: theme.panel }}>
-        <text content=" Threads · session only" style={{ fg: theme.accent, bg: theme.panel }} />
+        <text
+          content={state.navigating ? " Threads · j/k move · Enter open · Esc return" : " Threads · Ctrl+T to navigate"}
+          style={{ fg: theme.accent, bg: theme.panel }}
+        />
         {state.threads.length === 0 ? (
           <text
             content=" Save a user comment to create the first thread."
@@ -163,22 +234,15 @@ export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps
           <text
             key={thread.id}
             content={` ${thread.expanded ? "▾" : "▸"} ${oneLine(thread.title, Math.max(8, width - 10))} (${thread.comments.length})`}
-            style={{ fg: theme.text, bg: theme.panel }}
+            style={{ fg: theme.text, bg: state.selectedKey === `thread:${thread.id}` ? theme.panelAlt : theme.panel }}
             onMouseDown={() => toggleThread(thread.id)}
           />,
           ...(thread.expanded ? thread.comments.map(comment => (
             <text
               key={`${thread.id}:${comment.id}`}
               content={`   └ ${oneLine(comment.body, Math.max(8, width - 7))}`}
-              style={{ fg: theme.muted, bg: theme.panel }}
-              onMouseDown={() => {
-                const file = files.find(candidate => candidate.path === comment.filePath);
-                if (!file) {
-                  actions.notify(`Comment file is not visible: ${comment.filePath}`, "warning");
-                  return;
-                }
-                actions.revealLine(file.id, comment.side, comment.line);
-              }}
+              style={{ fg: theme.muted, bg: state.selectedKey === `comment:${thread.id}:${comment.id}` ? theme.panelAlt : theme.panel }}
+              onMouseDown={() => revealComment(comment, files, actions)}
             />
           )) : []),
         ])}
