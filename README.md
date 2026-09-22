@@ -48,10 +48,8 @@ keyboard navigation.
 Assignments and thread names are session-local prototype state: they do not
 change Hunk's native reply relationships and disappear when Hunk exits.
 
-Thread resolution is experimental. When the review cursor is on one assigned native
-root comment, a bottom-screen hint shows **X resolve native review thread**. Hunk
-does not currently persist a separate resolved state, so resolving removes the root
-comment
+Thread resolution is experimental. Hunk does not currently persist a separate
+resolved state, so resolving removes the root comment
 and every reply, leaf-first,
 after one confirmation. In Threads navigation, **X** instead resolves every native
 thread represented by the selected displayed group, then removes that group. If no

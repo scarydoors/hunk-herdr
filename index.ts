@@ -3,7 +3,6 @@ import { Bridge, buildPrompt, label, run, sameAgent, type Pane } from "./bridge.
 import { agentConfig } from "./config.ts";
 import { removeThread, threadAtSelection, threadsForCommentIds } from "./threads.ts";
 import {
-  NativeResolveHintPane,
   ThreadsPane,
   activateSelectedThreadItem,
   type ReviewThread,
@@ -16,7 +15,6 @@ import {
   moveCommentToUnassigned,
   moveThreadComments,
   moveThreadToUnassigned,
-  nativeThreadResolvableAtCurrentLine,
   selectedThreadItem,
   UNASSIGNED_THREAD_ID,
   UNASSIGNED_THREAD_TITLE,
@@ -41,15 +39,6 @@ export default function register(hunk: HunkExtensionAPI) {
     placement: "right",
     width: { preferred: 42, min: 28, max: 72, fraction: 0.3 },
     component: ThreadsPane,
-  });
-  hunk.registerPane({
-    id: "native-resolve-hint",
-    placement: "bottom",
-    height: { preferred: 1, min: 1, max: 1 },
-    defaultOpen: true,
-    currentLine: true,
-    available: nativeThreadResolvableAtCurrentLine,
-    component: NativeResolveHintPane,
   });
   hunk.registerKeyboardMode({
     id: "threads",
