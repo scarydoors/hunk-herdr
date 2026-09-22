@@ -1,13 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { ExtensionDiffFile, ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
-import { recordCommand, recordFix, resetCursorTracking } from "../cursor.ts";
+import type { ExtensionReviewNote } from "hunkdiff/extension";
 import {
   assignComment,
-  commentAtCursor,
   createThread,
-  paneCursor,
-  rememberSnapshot,
   createThreadFromComment,
   createThreadFromGroup,
   moveComment,
@@ -17,7 +13,6 @@ import {
   removeAssignedComment,
   resetThreadBoard,
   selectedThreadItem,
-  setCursorComment,
   setThreadCompleted,
   setThreadDispatching,
   startThreadNavigation,
@@ -56,6 +51,9 @@ test("navigates expanded thread rows and clears the selection on mode exit", () 
   assignComment(created.id, note("two", "Add a regression test"));
 
   assert.equal(startThreadNavigation(), true);
+  // Rows: heading, one, two. Navigation starts on the comment added last and wraps.
+  assert.deepEqual(selectedThreadItem(), { kind: "comment", thread: threadBoardSnapshot().threads[0], comment: threadBoardSnapshot().threads[0]?.comments[1] });
+  moveThreadSelection(1);
   assert.equal(selectedThreadItem()?.kind, "thread");
   moveThreadSelection(1);
   assert.deepEqual(selectedThreadItem(), { kind: "comment", thread: threadBoardSnapshot().threads[0], comment: threadBoardSnapshot().threads[0]?.comments[0] });
@@ -154,37 +152,10 @@ test("finds the group with the closest comment in the same file, using live anch
   assert.equal(nearestThreadForNote({ id: "new", filePath: "src/one.ts", side: "new", line: 80 })?.id, auth.id);
 });
 
-test("the comment at the cursor is the closest one in the selected file and hunk", () => {
-  resetThreadBoard();
-  const created = createThread("Authentication", { ...note("one", "Check auth handling"), line: 10 });
-  assignComment(created.id, { ...note("two", "Add a regression test"), line: 40 });
-  assignComment(created.id, { ...note("three", "Other hunk"), hunkIndex: 1, line: 200 });
-  const at = (line: number) => ({ side: "new" as const, line });
-  assert.equal(commentAtCursor("src/one.ts", 0, at(35))?.id, "two");
-  assert.equal(commentAtCursor("src/one.ts", 0, at(12))?.id, "one");
-  assert.equal(commentAtCursor("src/one.ts", 1, null)?.id, "three", "a lone comment needs no current line");
-  assert.equal(commentAtCursor("src/one.ts", 0, null), undefined, "two comments and no current line is a tie");
-  assert.equal(commentAtCursor("src/one.ts", 0, at(25)), undefined, "equally near comments highlight nothing, as P refuses");
-  assert.equal(commentAtCursor("src/one.ts", 2, at(200)), undefined);
-  assert.equal(commentAtCursor(undefined, 0, at(10)), undefined);
-});
-
-test("the active comment is measured by its saved range, like the command lookup", () => {
-  resetThreadBoard();
-  const created = createThread("Authentication", { ...note("span", "Spans a block"), line: 10, newRange: [10, 20] });
-  assignComment(created.id, { ...note("edge", "Right after it"), line: 21 });
-  // Line 20 is inside the first comment's range, so it wins over the adjacent one.
-  assert.equal(commentAtCursor("src/one.ts", 0, { side: "new", line: 20 })?.id, "span");
-  // A live anchor from Hunk replaces the saved geometry.
-  updateThreadCommentNavigation("span", { newRange: [100, 110], preferred: { side: "new", line: 100 } });
-  assert.equal(commentAtCursor("src/one.ts", 0, { side: "new", line: 20 })?.id, "edge");
-});
-
-test("Threads navigation starts on the comment at the review cursor", () => {
+test("Threads navigation starts on the comment added last", () => {
   resetThreadBoard();
   const created = createThread("Authentication", note("one", "Check auth handling"));
   assignComment(created.id, note("two", "Add a regression test"));
-  setCursorComment("two");
   startThreadNavigation();
   const selected = selectedThreadItem();
   assert.equal(selected?.kind === "comment" ? selected.comment.id : undefined, "two");
@@ -195,45 +166,11 @@ test("Threads navigation starts on the comment at the review cursor", () => {
   startThreadNavigation();
   assert.deepEqual(selectedThreadItem()?.kind, "thread");
   stopThreadNavigation();
+  toggleThread(created.id);
 
-  setCursorComment(undefined);
+  // A comment that was removed no longer steers the landing.
+  removeAssignedComment("two");
   startThreadNavigation();
   assert.equal(selectedThreadItem()?.kind, "thread");
-});
-
-test("the pane follows the cursor onto a note row by replaying Hunk's moves from the last exact position", () => {
-  resetThreadBoard();
-  resetCursorTracking();
-  const created = createThread("Authentication", { ...note("one", "Check auth handling"), side: "old", line: 10 });
-  assignComment(created.id, { ...note("two", "Add a regression test"), side: "old", line: 12 });
-  // A hunk that deletes old lines 10-12 and adds new line 10: rows -10, -11, -12, +10.
-  const file = { id: "runtime:one", path: "src/one.ts", patch: "@@ -10,3 +10,1 @@\n-a\n-b\n-c\n+d\n" } as unknown as ExtensionDiffFile;
-  const snapshot: ExtensionReviewSnapshot = {
-    generation: "g", stateRevision: 1,
-    files: [{ fileKey: "file:one", runtimeId: "runtime:one", path: "src/one.ts", changeKind: "change", stats: { additions: 1, deletions: 3, truncated: false }, flags: { untracked: false, binary: false, tooLarge: false, partial: false }, contentIdentity: "c" }],
-    notes: [
-      { id: "one", source: "user", fileKey: "file:one", summary: "a", editable: true, resolution: "active", anchor: { oldRange: [10, 10], preferred: { side: "old", line: 10 }, intersectingHunkIndices: [0], ownerHunkIndex: 0 } },
-      { id: "two", source: "user", fileKey: "file:one", summary: "b", editable: true, resolution: "active", anchor: { oldRange: [12, 12], preferred: { side: "old", line: 12 }, intersectingHunkIndices: [0], ownerHunkIndex: 0 } },
-    ],
-  };
-  rememberSnapshot(snapshot);
-  // Hunk paints a current line (split layout): that wins outright.
-  assert.deepEqual(paneCursor(file, 0, { side: "old", line: 11 }), { at: { side: "old", line: 11 } });
-  // Nothing known yet: no highlight rather than a guess.
-  assert.equal(commentAtCursor("src/one.ts", 0, paneCursor(file, 0, null)), undefined);
-  // The user saved "two": Hunk makes it active. Stepping up: row -12, row -11, then the note under -10.
-  recordFix({ kind: "note", noteId: "two" });
-  assert.equal(commentAtCursor("src/one.ts", 0, paneCursor(file, 0, null))?.id, "two");
-  recordCommand("hunk.review.stepUp");
-  assert.deepEqual(paneCursor(file, 0, null), { at: { side: "old", line: 12 } });
-  recordCommand("hunk.review.stepUp");
-  assert.deepEqual(paneCursor(file, 0, null), { at: { side: "old", line: 11 } });
-  recordCommand("hunk.review.stepUp");
-  assert.equal(commentAtCursor("src/one.ts", 0, paneCursor(file, 0, null))?.id, "one");
-  // Next note jumps straight to the other comment; a page move loses the position.
-  recordCommand("hunk.review.nextNote");
-  assert.equal(commentAtCursor("src/one.ts", 0, paneCursor(file, 0, null))?.id, "two");
-  recordCommand("hunk.review.pageDown");
-  assert.deepEqual(paneCursor(file, 0, null), { at: null });
-  resetCursorTracking();
+  stopThreadNavigation();
 });

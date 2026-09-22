@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pass the session ID</title><link rel="stylesheet" href="style.css"></head>
+<body><main>
+<nav class="crumbs"><a href="index.html">UX ideas</a> · 02</nav>
+<h1>Pass the session, don’t make the agent find it</h1>
+<p class="lede">The prompt tells the agent to run <code>hunk session list --json</code> and to <strong>ask</strong> if several sessions match. The agent is hidden behind Hunk’s zoom, so a question is invisible — the user sees a spinner that never ends. The extension already knows the exact session: <code>removeThread()</code> resolves it by <code>reviewPublication.generation</code> before every resolve.</p>
+
+<h2>Failure mode today</h2>
+<div class="flow">
+<div class="box">P → prompt sent</div><span class="ar">→</span>
+<div class="box">agent: <code>hunk session list</code></div><span class="ar">→</span>
+<div class="box bad">2 sessions match cwd<br><small>(two Hunk windows, or a worktree)</small></div><span class="ar">→</span>
+<div class="box bad">agent asks “which one?”<br><small>in a pane nobody can see</small></div><span class="ar">→</span>
+<div class="box bad">⠋ spins until resolve/stop</div>
+</div>
+<p style="margin-top:14px">The spinner is honest — Herdr’s wait matches <code>idle|done|blocked</code>, and an agent waiting for an answer is <code>idle</code> only if its CLI reports it that way. Either way the user has no idea a question was asked.</p>
+
+<h2>Proposed</h2>
+<div class="flow">
+<div class="box">P</div><span class="ar">→</span>
+<div class="box ok">extension: <code>hunk session list --json</code><br><small>match <code>generation</code> — same code as resolve</small></div><span class="ar">→</span>
+<div class="box ok">prompt carries <code>sessionId</code></div><span class="ar">→</span>
+<div class="box">agent uses it verbatim</div>
+</div>
+
+<h2>Prompt diff</h2>
+<pre><span class="c">// bridge.ts · buildPrompt</span>
+ "The user is prompting you from a live Hunk review in Herdr."
+ "Before doing the task, run `hunk skill path` and read the returned file completely."
+ `Hunk resolved that skill here: ${skill}.`
+ `Review working directory: ${cwd}. Your own cwd may differ.`
+<span class="d">-"Use `hunk session list --json` to locate this review; use its exact session ID for
+- subsequent commands. If multiple sessions match and you cannot identify this window,
+- ask rather than guess."</span>
+<span class="a">+`HUNK SESSION (authoritative): ${sessionId}. Pass it as the first argument to every
++ `hunk session …` command. Do not run `hunk session list` to pick a session, and never
++ ask which session is meant.`</span>
+ …</pre>
+
+<h2>Where the ID comes from</h2>
+<pre><span class="c">// threads.ts — extract from removeThread, reuse in both places</span>
+<span class="a">+export async function liveSessionId(run, cwd, generation): Promise&lt;string&gt; {
++  listed = JSON.parse(await run("hunk", ["session", "list", "--json"], cwd))
++  matches = listed.sessions.filter(s => s.snapshot?.state?.reviewPublication?.generation === generation)
++  if matches.length !== 1: throw "The live Hunk session could not be identified"
++  return matches[0].sessionId
++}</span>
+
+ removeThread(run, cwd, generation, notes)
+<span class="d">-  listed = …; matches = …; if (…) throw …</span>
+<span class="a">+  id = await liveSessionId(run, cwd, generation)</span>
+   for note of notes: run("hunk", ["session","comment","rm", id, note.id, "--json"], cwd)
+
+<span class="c">// index.ts · prompt(ctx)</span>
+ skill = await bridge.skillPath()
+<span class="a">+sessionId = await liveSessionId(run, ctx.cwd, ctx.review.snapshot().generation)</span>
+ payload = buildPrompt(skill, ctx.cwd, text, { <span class="a">sessionId,</span> file, hunk, thread })</pre>
+
+<h2>Side effects worth noting</h2>
+<div class="grid">
+<div class="card"><h4>Failure moves to the user</h4><p>If the session can’t be identified, <code>P</code> now fails with a warning toast <em>before</em> anything is sent — the same message resolve already shows — instead of the agent stalling.</p></div>
+<div class="card"><h4>One fewer agent tool call</h4><p>The agent skips <code>session list</code> and goes straight to <code>session review</code>, so the first visible progress arrives sooner.</p></div>
+<div class="card"><h4>Independent of every other idea</h4><p>Touches <code>buildPrompt</code>, one helper in <code>threads.ts</code>, and the prompt test fixtures. No pane or state changes.</p></div>
+</div>
+
+<h2>Touch points</h2>
+<ul class="files">
+<li><b>bridge.ts</b> — buildPrompt signature + text</li>
+<li><b>threads.ts</b> — liveSessionId(), removeThread uses it</li>
+<li><b>index.ts</b> — prompt() resolves the ID</li>
+<li><b>test/bridge.test.ts, test/threads.test.ts</b> — fixtures</li>
+</ul>
+</main></body></html>

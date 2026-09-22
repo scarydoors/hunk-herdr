@@ -5,8 +5,7 @@ import { Bridge, type Pane } from "../bridge.ts";
 import type { ExtensionKeyEvent, ExtensionCommandContext, ExtensionKeyboardMode, ExtensionReviewNote, ExtensionReviewSelection, ExtensionReviewSnapshot, ExtensionReviewSnapshotNote, HunkExtensionAPI } from "hunkdiff/extension";
 
 type KeyboardMode = { id: string; onKey: ExtensionKeyboardMode["onKey"]; onEnter?: () => void; onExit?: () => void };
-import { createThread, resetThreadBoard, setCursorComment, threadBoardSnapshot } from "../threads-pane.tsx";
-import { resetCursorTracking } from "../cursor.ts";
+import { createThread, resetThreadBoard, selectedThreadItem, threadBoardSnapshot } from "../threads-pane.tsx";
 import { DEFAULT_REQUEST } from "../index.ts";
 
 const caller: Pane = { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", terminal_id: "caller" };
@@ -29,12 +28,10 @@ function host(config: Record<string, unknown> = {}) {
     live: true, inputCalls: 0, cliRegistered: false, paneRegistered: false, keyboardModeRegistered: false,
     snapshot: {} as ExtensionReviewSnapshot,
     selection: { file: null, hunkIndex: null, currentLine: null } as ExtensionReviewSelection,
-    /** Which built-in commands Hunk would report enabled, e.g. editActiveNote while a note is active. */
-    enabled: new Set<string>(),
+    confirmed: false,
   };
   const ctx = {
     cwd: "/review", review: { snapshot: () => state.live ? state.snapshot : null },
-    commands: { isEnabled: (id: string) => state.enabled.has(id), execute: () => false },
     get selection() { return state.selection; }, notify: (text: string) => notices.push(text),
     panes: {
       open: (id: string) => { openPanes.add(id); openedPanes.push(id); },
@@ -49,7 +46,7 @@ function host(config: Record<string, unknown> = {}) {
     },
     dialogs: {
       select: async (arg: { options: string[] }) => { options.push(arg.options); return answers.shift() ?? null; },
-      input: async (arg: { title: string; initial?: string }) => { state.inputCalls++; inputTitles.push(arg.title); inputInitials.push(arg.initial ?? ""); return inputs.shift() ?? null; }, confirm: async () => false,
+      input: async (arg: { title: string; initial?: string }) => { state.inputCalls++; inputTitles.push(arg.title); inputInitials.push(arg.initial ?? ""); return inputs.shift() ?? null; }, confirm: async () => state.confirmed,
     },
   } as unknown as ExtensionCommandContext;
   register({
@@ -64,7 +61,7 @@ function host(config: Record<string, unknown> = {}) {
   return {
     commands, ctx, answers, inputs, inputTitles, inputInitials, notices, options, openedPanes, state,
     invoke: async (id: string) => commands.get(id)!(ctx),
-    /** Focus Threads navigation, which selects the first row (or the cursor's comment). */
+    /** Focus Threads navigation, which selects the comment saved last (or the first row). */
     focus: () => ctx.keyboardModes.enterMode("threads"),
     press: (key: Partial<ExtensionKeyEvent>) =>
       keyboardModes.get("threads")!.onKey({ name: "", sequence: "", ...key } as ExtensionKeyEvent, ctx as never),
@@ -115,7 +112,7 @@ test("a saved comment lands in Unassigned without a dialog when its file has no 
   assert.equal(h.options.length, 0, "no assignment dialog");
   assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]), [["Unassigned", 1]]);
   assert.deepEqual(h.openedPanes, ["threads"]);
-  assert.equal(h.notices.at(-1), "Added to Unassigned · Ctrl+R to move or name");
+  assert.equal(h.notices.at(-1), "Added to Unassigned · Ctrl+T then P to prompt, Ctrl+R to move or name");
 });
 
 test("a saved comment joins the group holding the closest comment in the same file", async () => {
@@ -131,7 +128,7 @@ test("a saved comment joins the group holding the closest comment in the same fi
     ["Tests", ["user:test", "user:three"]],
     ["Unassigned", ["user:four"]],
   ]);
-  assert.equal(h.notices[0], "Added to Authentication · Ctrl+R to move or name");
+  assert.equal(h.notices[0], "Added to Authentication · Ctrl+T then P to prompt, Ctrl+R to move or name");
 });
 
 test("native replies do not trigger thread assignment", async () => {
@@ -147,119 +144,62 @@ test("reassigns the selected Threads group through the pane command", async () =
   const h = host();
   createThread("Authentication", authNote);
   createThread("Tests", { ...authNote, id: "user:two", filePath: "src/auth.test.ts", body: "Add a refresh test" });
+  // Ctrl+T lands on the comment saved last; one step up selects its group heading.
   await h.invoke("focus-threads");
-  h.answers.push("Tests · 1 comment [1]");
+  h.press({ name: "k" });
+  assert.equal(selectedThreadItem()?.kind, "thread");
+  h.answers.push("Authentication · 1 comment [1]");
   await h.invoke("reassign-thread-group");
-  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]), [["Tests", 2]]);
-  assert.match(h.notices.at(-1)!, /Moved 1 comment to thread: Tests/);
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]), [["Authentication", 2]]);
+  assert.match(h.notices.at(-1)!, /Moved 1 comment to thread: Authentication/);
 });
 
-test("Ctrl+R from the review cursor names the comment under it, filing it first if needed", async () => {
-  resetThreadBoard();
-  const h = host();
-  // A comment saved before this session is in no group yet; the cursor sits on it.
-  h.state.snapshot = reviewAt([{ id: "user:old", line: 40 }]);
-  h.state.selection = cursorAt(40);
-  h.answers.push("+ Create new thread…");
-  h.inputs.push("Authentication");
-  await h.invoke("reassign-thread-group");
-  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.map(comment => comment.id)]), [
-    ["Unassigned", []], ["Authentication", ["user:old"]],
-  ]);
-  assert.match(h.notices.at(-1)!, /Moved comment to thread: Authentication/);
-});
-
-test("P on a line with no comment warns instead of prompting anything", async t => {
+test("P, A and Ctrl+R outside Threads focus only say how to select a target", async t => {
   resetThreadBoard();
   createThread("Authentication", authNote);
   t.mock.method(Bridge.prototype, "caller", async () => caller);
   const agents = t.mock.method(Bridge.prototype, "agents", async () => [agent]);
   const h = host();
   h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }]);
-  h.state.selection = cursorAt(90);
-  h.state.snapshot = { ...h.state.snapshot, notes: [] };
-  await h.invoke("prompt");
-  assert.equal(h.notices.at(-1), "No review comment at the cursor. Save one, or focus Threads (Ctrl+T).");
+  h.state.selection = cursorAt(12);
+  for (const id of ["prompt", "menu", "reassign-thread-group"]) {
+    await h.invoke(id);
+    assert.equal(h.notices.at(-1), "Focus Threads (Ctrl+T) and select a group or comment first.", id);
+  }
   assert.equal(agents.mock.callCount(), 0);
   assert.equal(h.options.length, 0);
 });
 
-test("P from the review cursor prompts the group of the comment under it", async t => {
+test("Ctrl+T lands on the comment saved last, so P right after acts on its group", async t => {
   resetThreadBoard();
   createThread("Authentication", authNote);
   t.mock.method(Bridge.prototype, "caller", async () => caller);
   t.mock.method(Bridge.prototype, "agents", async () => [agent]);
   t.mock.method(Bridge.prototype, "validate", async () => agent);
   const h = host();
-  h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }]);
-  h.state.selection = cursorAt(13);
+  await h.emit("note_created", { note: { ...authNote, id: "user:two", filePath: "src/other.ts", line: 40, body: "Cover the failure path" } });
+  assert.match(h.notices.at(-1)!, /^Added to Unassigned · Ctrl\+T then P/);
+  await h.invoke("focus-threads");
+  const selected = selectedThreadItem();
+  assert.equal(selected?.kind === "comment" ? selected.comment.id : undefined, "user:two");
   h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
   h.inputs.push(null);
   await h.invoke("prompt");
-  assert.match(h.inputTitles.at(-1)!, /· Authentication$/);
+  assert.match(h.inputTitles.at(-1)!, /· Unassigned$/);
 });
 
-test("the comment the pane shows as active is the one a review-side key acts on", async () => {
+test("X from the review resolves the native thread at the current line, as before", async () => {
   resetThreadBoard();
   const h = host();
-  createThread("Authentication", authNote);
-  createThread("Tests", { ...authNote, id: "user:two", line: 40, body: "Cover the failure path" });
-  // The snapshot lookup alone would pick the comment at line 12 for a cursor on line 13…
+  const removed: string[] = [];
   h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }, { id: "user:two", line: 40 }]);
-  h.state.selection = cursorAt(13);
-  // …but the pane is highlighting the other one, and the highlight is the rule.
-  setCursorComment("user:two");
-  h.answers.push("Unassigned");
-  await h.invoke("reassign-thread-group");
-  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.map(comment => comment.id)]), [
-    ["Authentication", ["user:one"]], ["Tests", []], ["Unassigned", ["user:two"]],
-  ]);
-  setCursorComment(undefined);
-});
-
-test("on a note row, the cursor is replayed from the last exact position and checked against Hunk's active-note flag", async () => {
-  resetThreadBoard();
-  resetCursorTracking();
-  const h = host();
-  h.state.snapshot = reviewAt([{ id: "user:a", line: 10 }, { id: "user:b", line: 11 }]);
-  // Ctrl+R on line 11 records that exact position (and files the comment there, b, in
-  // Unassigned); then Hunk reports one step up, which lands on the note row under line 10.
-  h.state.selection = cursorAt(11);
-  h.answers.push("Leave unchanged");
-  await h.invoke("reassign-thread-group");
-  await h.emit("command_executed", { commandId: "hunk.review.stepUp" });
-  // Hunk now has a note active and no current line.
   h.state.selection = cursorAt(null);
-  h.state.enabled.add("hunk.review.editActiveNote");
-  h.answers.push("+ Create new thread…");
-  h.inputs.push("Authentication");
-  await h.invoke("reassign-thread-group");
-  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.map(comment => comment.id)]), [
-    ["Unassigned", ["user:b"]], ["Authentication", ["user:a"]],
-  ]);
-  // The replay says "line" but Hunk says a note is active: the replay is not trusted.
-  await h.emit("command_executed", { commandId: "hunk.review.stepUp" });
-  await h.invoke("reassign-thread-group");
-  assert.match(h.notices.at(-1)!, /did not say which is under the cursor/);
-  resetCursorTracking();
-});
-
-test("saving a comment makes it the cursor's note, so Ctrl+R right after names that comment", async () => {
-  resetThreadBoard();
-  resetCursorTracking();
-  const h = host();
-  createThread("Authentication", authNote);
-  h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }, { id: "user:two", line: 40 }]);
-  await h.emit("note_created", { note: { ...authNote, id: "user:two", line: 40, body: "Cover the failure path" } });
-  h.state.selection = cursorAt(null);
-  h.state.enabled.add("hunk.review.editActiveNote");
-  setCursorComment(undefined);
-  h.answers.push("Unassigned");
-  await h.invoke("reassign-thread-group");
-  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.map(comment => comment.id)]), [
-    ["Authentication", ["user:one"]], ["Unassigned", ["user:two"]],
-  ]);
-  resetCursorTracking();
+  await h.invoke("resolve-thread");
+  assert.match(h.notices.at(-1)!, /2 review threads share this location/);
+  h.state.selection = cursorAt(40);
+  h.state.confirmed = false;
+  await h.invoke("resolve-thread");
+  assert.equal(removed.length, 0, "declining the confirmation resolves nothing");
 });
 
 test("Ctrl+L configures models without Threads focus", async () => {
