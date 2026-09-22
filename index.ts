@@ -6,14 +6,16 @@ import {
   ThreadsPane,
   activateSelectedThreadItem,
   assignComment,
+  assignUnassignedThread,
   createThread,
+  UNASSIGNED_THREAD_ID,
+  UNASSIGNED_THREAD_TITLE,
   moveThreadSelection,
   removeAssignedComment,
   startThreadNavigation,
   stopThreadNavigation,
   suggestedThreadTitle,
   threadBoardSnapshot,
-  threadForComment,
   updateAssignedComment,
 } from "./threads-pane.tsx";
 
@@ -49,6 +51,7 @@ export default function register(hunk: HunkExtensionAPI) {
 
   let bridge: Bridge | undefined;
   let target: Pane | undefined;
+  let preferredThreadId = UNASSIGNED_THREAD_ID;
   let draft = "";
   let disposed = false;
   let pending: Promise<void> | undefined;
@@ -170,35 +173,50 @@ export default function register(hunk: HunkExtensionAPI) {
   async function assignUserComment(note: ExtensionReviewNote, ctx: ExtensionEventContext): Promise<void> {
     if (note.draft) return;
     const threads = threadBoardSnapshot().threads;
-    const parentThread = threadForComment(note.parentId);
-    const entries = [...threads]
-      .sort((left, right) => Number(right.id === parentThread?.id) - Number(left.id === parentThread?.id))
+    const entries = threads
+      .filter(thread => thread.id !== UNASSIGNED_THREAD_ID)
       .map((thread, index) => ({
         thread,
-        label: `${thread.id === parentThread?.id ? "↳ " : ""}${thread.title} · ${thread.comments.length} comment${thread.comments.length === 1 ? "" : "s"} [${index + 1}]`,
+        label: `${thread.title} · ${thread.comments.length} comment${thread.comments.length === 1 ? "" : "s"} [${index + 1}]`,
       }));
     const create = "+ Create new thread…";
-    const leave = "Leave unassigned";
+    const unassigned = UNASSIGNED_THREAD_TITLE;
+    const options = [
+      { id: UNASSIGNED_THREAD_ID, label: unassigned },
+      ...entries.map(entry => ({ id: entry.thread.id, label: entry.label })),
+      { id: create, label: create },
+    ].sort((left, right) => Number(right.id === preferredThreadId) - Number(left.id === preferredThreadId));
     const picked = await ctx.dialogs.select({
       title: "Assign saved comment to a thread",
-      options: [...entries.map(entry => entry.label), create, leave],
+      // Hunk selects the first option initially; keep the last chosen thread there.
+      options: options.map(option => option.label),
     });
-    if (!picked || picked === leave) return;
     let assignedTitle: string;
-    if (picked === create) {
+    if (!picked || picked === unassigned) {
+      const thread = assignUnassignedThread(note);
+      if (picked) preferredThreadId = thread.id;
+      assignedTitle = thread.title;
+    } else if (picked === create) {
       const title = await ctx.dialogs.input({
         title: "New thread title",
         placeholder: "What unit of work does this comment belong to?",
         initial: suggestedThreadTitle(note),
       });
-      if (!title?.trim()) return;
-      assignedTitle = createThread(title, note).title;
+      if (!title?.trim()) {
+        assignedTitle = assignUnassignedThread(note).title;
+      } else {
+        const thread = createThread(title, note);
+        // "Create" is a one-off action; next time select the thread it created.
+        preferredThreadId = thread.id;
+        assignedTitle = thread.title;
+      }
     } else {
       const entry = entries.find(candidate => candidate.label === picked);
       if (!entry || !assignComment(entry.thread.id, note)) {
-        ctx.notify("That thread is no longer available; the comment was left unassigned.", "warning");
+        ctx.notify("That thread is no longer available; the comment was not assigned.", "warning");
         return;
       }
+      preferredThreadId = entry.thread.id;
       assignedTitle = entry.thread.title;
     }
     ctx.panes.open("threads");

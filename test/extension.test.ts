@@ -76,6 +76,33 @@ test("registers discoverable commands and diagnostic CLI without requiring statu
   assert.equal(threadBoardSnapshot().threads[0]?.title, "Authentication");
   assert.deepEqual(h.openedPanes, ["threads"]);
   assert.match(h.notices.at(-1)!, /Assigned comment/);
+
+  await h.emit("note_created", { note: { ...note, id: "user:two", body: "Add a refresh test" } });
+  assert.match(h.options[1]![0]!, /^Authentication · 1 comment/);
+});
+
+test("Unassigned groups explicitly unassigned comments", async () => {
+  resetThreadBoard();
+  const h = host();
+  const note: ExtensionReviewNote = {
+    id: "user:one", fileId: "runtime:one", filePath: "src/one.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expired credentials", draft: false,
+  };
+  h.answers.push("Unassigned", "Unassigned");
+  await h.emit("note_created", { note });
+  await h.emit("note_created", { note: { ...note, id: "user:two" } });
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]), [["Unassigned", 2]]);
+});
+
+test("cancelling assignment puts the comment in Unassigned", async () => {
+  resetThreadBoard();
+  const h = host();
+  const note: ExtensionReviewNote = {
+    id: "user:one", fileId: "runtime:one", filePath: "src/one.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expired credentials", draft: false,
+  };
+  await h.emit("note_created", { note });
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]), [["Unassigned", 1]]);
 });
 
 test("cancelled picker never spawns or prompts", async t => {

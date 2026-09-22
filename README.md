@@ -20,8 +20,10 @@ Open Hunk in a Herdr pane, then:
 ## Threads interface experiment
 
 After a user saves a review comment, the extension asks whether to assign it to
-an existing thread, create a new named thread, or leave it unassigned. Replies
-show their parent's assigned thread first, but assignment remains explicit.
+an existing thread, create a new named thread, or assign it to the session-wide
+**Unassigned** group. Escaping or cancelling the selector also places the comment
+in Unassigned. The selector starts on the thread chosen last; after creating a
+thread, that newly created thread becomes the next default.
 Creating or choosing a thread opens the right-hand Threads sidebar.
 
 Each thread can be expanded or collapsed by clicking its row. Expanded threads
