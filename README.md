@@ -8,21 +8,27 @@ is required: this is a **Hunk** extension, with an editable checkout in `~/work/
 
 Open Hunk in a Herdr pane, then:
 
-The happy path is **save a comment → P → Enter → Enter**: the comment joins a
-group on its own, P acts on the comment under the review cursor, the first picker
-row starts the default agent, and an empty prompt tells it to address the group's
-comments.
+The happy path is **save a comment → Ctrl+T → P → Enter → Enter**: the comment
+joins a group on its own, Ctrl+T focuses the Threads sidebar on the comment you just
+saved, P acts on that comment's group, the first picker row starts the default agent,
+and an empty prompt tells it to address the group's comments.
 
-- **A** — actions for the Threads group: choose, prompt, inspect, reveal, or stop its agent.
-- **P** — prompt the Threads group (opens its agent picker if none is assigned).
-- **Ctrl+R** — move the group or comment to another thread, or name a new one.
+The sidebar is the cursor for comments. Hunk never tells an extension which note its
+own review cursor is on, but it will reveal any line exactly, so the relationship runs
+the other way: as you move the sidebar selection with `j`/`k`, the diff scrolls to the
+selected comment, and **P**, **A**, **Ctrl+R** and **X** act on the selected row.
+
+- **Ctrl+T** — focus Threads keyboard navigation. It starts on the comment you saved
+  last; `j`/`k` (or arrows) move, the diff follows, and Enter expands or collapses a group.
+- **A** — actions for the selected group: choose, prompt, inspect, reveal, or stop its agent.
+- **P** — prompt the selected group (opens its agent picker if none is assigned).
+- **Ctrl+R** — move the selected group or comment to another thread, or name a new one.
 - **T** — show or hide the session-local Threads sidebar.
-- **Ctrl+T** — focus Threads keyboard navigation (`j`/`k` or arrows, then Enter). It
-  starts on the comment nearest the review cursor.
 - **Esc** — leave Threads navigation and return to the review; the sidebar stays open.
 - **Ctrl+L** — choose a saved default model for Pi or Claude.
 - **?** — while Threads navigation is focused, toggle its keybinding list in the pane.
-- **X** — resolve the review thread at the current line/hunk. Resolving works while an
+- **X** — resolve the selected group or comment; from the review, the native thread at
+  the current line or hunk. Resolving works while an
   agent is still running; once a group's last comment is resolved the group is retired,
   and a temporary agent Herdr started for it is closed. Agents you picked keep running.
 - **Extensions → Herdr** commands also expose selection, status, reveal, hide,
@@ -37,34 +43,18 @@ the group, and **Ctrl+R** moves the comment elsewhere or into a new named thread
 Native replies remain in their root conversation and are never assigned. Saving a
 comment opens the right-hand Threads sidebar.
 
-The sidebar follows the review cursor: the assigned comment nearest the current line
-in the selected hunk is drawn as active, and a collapsed group that holds it is
-tinted. Each thread can be expanded or collapsed by clicking its row. Expanded threads
-list their assigned comments; clicking a comment navigates to its source line.
+Each thread can be expanded or collapsed by clicking its row or pressing Enter on it.
+Expanded threads list their assigned comments; clicking a comment navigates to its
+source line.
 
-**P**, **A**, **Ctrl+R** and **X** act on the comment the sidebar shows as active, or
-on the keyboard-selected row while Threads navigation (**Ctrl+T**) is focused. That
-is a rule, not a coincidence: the highlight is read back rather than recomputed, so
-what you see is what a key touches. With nothing highlighted, the same rule is applied
-to the review itself, which also covers a comment saved before this session (filed in
-Unassigned first) and an agent's comment when none of yours is in the hunk. A line
-with no comment shows a notice and does nothing. Use **Ctrl+T** to navigate the
-sidebar by keyboard: `j`/`k` (or arrows) moves, and Enter expands a thread or jumps to
-a selected comment.
-
-How the cursor is followed onto a comment's own row deserves a note, because Hunk
-does not say. While the cursor rests on an inline note row, Hunk's selection reports
-no current line and no note id, and in the unified layout it paints no current line
-for panes at all. The extension therefore rebuilds Hunk's list of cursor stops (every
-diff row, with each visible note's row directly under its anchor row) from the file's
-patch and the saved notes, and replays the moves Hunk reports as executed commands
-(Up/Down, next/previous note, hunk jumps) from the last position Hunk did state: the
-current line of your last command, or a comment you just saved, which Hunk makes
-active. Before acting on a replayed note row, the extension checks Hunk's own
-"a note is active" flag (its edit/reply commands being enabled) and the selected hunk.
-Page moves, jumps to the top or bottom, file changes and mouse clicks lose the
-position until the cursor is next on a source line; a Ctrl+R on such a row says so
-and asks you to step onto the comment with ↑/↓.
+**Ctrl+T** focuses the sidebar, landing on the comment you saved last. While it is
+focused, `j`/`k` (or arrows) move the selection and the diff scrolls to the selected
+comment, so the sidebar works as a cursor over your comments. **P**, **A**, **Ctrl+R**
+and **X** act on the selected row; pressed from the review instead, they say to focus
+Threads first. This is deliberate: Hunk exposes no "which note is the cursor on"
+signal to extensions, and in the unified layout it paints no current line for panes,
+so any review-side guess is an approximation. Revealing a line from the sidebar is
+exact.
 
 **P** prompts the group's assigned agent, or opens the picker if it has none. The
 picker's first row starts the configured default agent (or the only configured kind),
@@ -95,11 +85,9 @@ resolved state, so resolving removes the root comment
 and every reply, leaf-first,
 after one confirmation. In Threads navigation, **X** resolves the selected group's
 native threads when its heading is focused, or only the selected comment's native
-thread when a comment is focused. From the review, the comment the Threads pane
-highlights is used: the one under the cursor on a note row, otherwise your own
-comment nearest the current line in rendered rows, with agent and AI comments
-counting only when none of yours is in the hunk. Only an exact tie, or a note row the
-extension could not follow the cursor onto, shows a notice and changes nothing.
+thread when a comment is focused. From the review, **X** resolves the native thread
+whose note contains the current line, else the only thread in the selected hunk; a
+hunk holding several threads shows a notice and changes nothing.
 
 The picker lists agents from the calling pane's **live workspace**, across tabs,
 with their name/kind, state, pane ID and cwd. It excludes Hunk's own pane. Selecting

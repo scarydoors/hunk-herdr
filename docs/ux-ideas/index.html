@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hunk-herdr UX ideas</title><link rel="stylesheet" href="style.css"></head>
+<body><main>
+<h1>hunk-herdr · UX ideas</h1>
+<p class="lede">Six independently implementable changes that reduce the friction of actually using the extension. Each doc is one idea; two pairs are best landed sequentially rather than in parallel.</p>
+
+<div class="idx">
+<a href="01-happy-path.html"><div class="card"><div class="k">01 · highest impact</div><h4>Shorten the happy path</h4><p>Seven modals → comment, P, Enter. Auto-assign, DWIM P/A from the cursor, default agent first, empty prompt means “do the comments”.</p></div></a>
+<a href="02-session-id.html"><div class="card"><div class="k">02 · small, standalone</div><h4>Pass the session, don’t make the agent find it</h4><p>A hidden agent that asks “which session?” is a spinner that never ends. The extension already knows the ID.</p></div></a>
+<a href="03-agent-state.html"><div class="card"><div class="k">03 · feedback</div><h4>Make agent state visible</h4><p>A sticky “needs attention” row state for blocked/stalled agents, and a Herdr notification when a turn finishes.</p></div></a>
+<a href="04-pane-rows.html"><div class="card"><div class="k">04 · pane</div><h4>Richer Threads pane rows</h4><p>Agent on the group row, reply counts on comments, select the group you just assigned to.</p></div></a>
+<a href="05-actions-menu.html"><div class="card"><div class="k">05 · menu</div><h4>Contextual agent-actions menu + peek</h4><p>Build the A menu from the binding’s state; peek at the agent’s last lines without unzooming.</p></div></a>
+<a href="06-persistence.html"><div class="card"><div class="k">06 · largest</div><h4>Persist threads and reattach agents</h4><p>One state file per repo root; rehydrate from the review snapshot; reattach or recognise orphaned temporary agents.</p></div></a>
+</div>
+
+<h2>Dependencies</h2>
+<table>
+<tr><th>Pair</th><th>Relationship</th></tr>
+<tr><td>01 → 03</td><td>Order preference only. Less time in the pane makes visible state matter more.</td></tr>
+<tr><td>03 ↔ 04</td><td>Both edit the group-row template. Land one before starting the other, either order.</td></tr>
+<tr><td>01a + 01b</td><td>Ship together: auto-assign without DWIM P leaves no fast way to reach the group.</td></tr>
+<tr><td>05 + 01c</td><td>Both surface <code>default_agent</code> where the user acts; consistent wording helps but neither requires the other.</td></tr>
+</table>
+</main></body></html>

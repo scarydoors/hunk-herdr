@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionReviewSelection, ExtensionReviewSnapshot, ExtensionReviewSnapshotNote } from "hunkdiff/extension";
-import { nearestToCursor, nearestToLine, removeThread, rowIndexOf, threadAtSelection, threadsForCommentIds, type LineAnchor } from "../threads.ts";
+import { nearestToLine, removeThread, threadAtSelection, threadsForCommentIds, type LineAnchor } from "../threads.ts";
 import type { Run } from "../bridge.ts";
 
 function note(id: string, options: { parentId?: string; line?: number; hunk?: number } = {}): ExtensionReviewSnapshotNote {
@@ -43,44 +43,10 @@ test("finds one whole thread at the current line and orders children before pare
   if (match.kind === "found") assert.deepEqual(match.notes.map(item => item.id), ["nested", "reply", "root"]);
 });
 
-test("picks the thread nearest the cursor line when the hunk holds several", () => {
-  const notes = [note("near", { line: 14 }), note("far", { line: 30 }), note("reply", { parentId: "far", line: 31 })];
-  const match = threadAtSelection(snapshot(notes), selection(12));
-  assert.equal(match.kind, "found");
-  if (match.kind === "found") assert.equal(match.root.id, "near");
-
-  const below = threadAtSelection(snapshot(notes), selection(26));
-  if (below.kind === "found") assert.deepEqual(below.notes.map(item => item.id), ["reply", "far"]);
-  else assert.fail("expected the lower thread");
-});
-
-test("a note whose range contains the line wins over a closer edge", () => {
-  const spanning: ExtensionReviewSnapshotNote = { ...note("span"), anchor: { ...note("span").anchor, newRange: [10, 20] } };
-  const match = threadAtSelection(snapshot([spanning, note("edge", { line: 21 })]), selection(20));
-  assert.equal(match.kind === "found" && match.root.id, "span");
-});
-
-test("refuses only an exact tie, naming how to break it", () => {
-  const tie = threadAtSelection(snapshot([note("one", { line: 10 }), note("two", { line: 14 })]), selection(12));
-  assert.equal(tie.kind, "ambiguous");
-  if (tie.kind === "ambiguous") assert.match(tie.message, /2 of your comments are equally close/);
-
-  const noLine = threadAtSelection(snapshot([note("one"), note("two")]), selection(null));
-  assert.equal(noLine.kind, "ambiguous");
-  if (noLine.kind === "ambiguous") assert.match(noLine.message, /share this hunk/);
-});
-
-test("an agent's comment beside yours never makes the hunk ambiguous", () => {
-  const agentNote: ExtensionReviewSnapshotNote = { ...note("agent", { line: 12 }), source: "agent" };
-  const mine = note("mine", { line: 30 });
-  // Same line as the agent's comment, and no current line at all: still yours.
-  for (const at of [selection(12), selection(null)]) {
-    const match = threadAtSelection(snapshot([agentNote, mine]), at);
-    assert.equal(match.kind === "found" && match.root.id, "mine");
-  }
-  // With none of your comments in the hunk, the agent's thread is what X resolves.
-  const only = threadAtSelection(snapshot([agentNote]), selection(12));
-  assert.equal(only.kind === "found" && only.root.id, "agent");
+test("refuses an ambiguous location without selecting a thread", () => {
+  const match = threadAtSelection(snapshot([note("one"), note("two")]), selection());
+  assert.equal(match.kind, "ambiguous");
+  if (match.kind === "ambiguous") assert.match(match.message, /2 review threads/);
 });
 
 test("falls back to the selected hunk when no exact line matches", () => {
@@ -120,46 +86,18 @@ test("does not remove anything when the live session is not uniquely identified"
   assert.equal(calls.length, 1);
 });
 
-test("a cursor that names a note row resolves to that item exactly, and to nothing without an id", () => {
+test("nearestToLine measures by range containment, then by gap, and reports exact ties", () => {
   const anchors: Record<string, LineAnchor> = {
-    a: { newRange: [10, 10], preferred: { side: "new", line: 10 } },
-    b: { newRange: [11, 11], preferred: { side: "new", line: 11 } },
-  };
-  const items = Object.keys(anchors);
-  const by = (id: string) => anchors[id]!;
-  assert.deepEqual(nearestToCursor(items, by, { at: null, noteId: "b" }, id => id), { kind: "one", item: "b", distance: 0 });
-  assert.deepEqual(nearestToCursor(items, by, { at: null, noteId: "zz" }, id => id), { kind: "none" });
-  assert.equal(nearestToCursor(items, by, { at: null }).kind, "tie", "a note row nobody identified is a tie");
-  assert.deepEqual(nearestToCursor(items, by, { at: { side: "new", line: 10 } }), { kind: "one", item: "a", distance: 0 });
-});
-
-test("threadAtSelection takes the named note's thread whoever wrote it, and explains an unidentified note row", () => {
-  const agentNote: ExtensionReviewSnapshotNote = { ...note("agent", { line: 12 }), source: "agent" };
-  const notes = [note("one", { line: 10 }), note("two", { line: 11 }), agentNote, note("reply", { parentId: "two", line: 11 })];
-  const onRow = threadAtSelection(snapshot(notes), selection(null), { at: null, noteId: "two" });
-  assert.equal(onRow.kind === "found" && onRow.root.id, "two");
-  if (onRow.kind === "found") assert.deepEqual(onRow.notes.map(item => item.id), ["reply", "two"]);
-  const onAgent = threadAtSelection(snapshot(notes), selection(null), { at: null, noteId: "agent" });
-  assert.equal(onAgent.kind === "found" && onAgent.root.id, "agent", "X on an agent's row resolves that thread");
-  const lost = threadAtSelection(snapshot(notes), selection(null));
-  if (lost.kind === "ambiguous") assert.match(lost.message, /did not say which is under the cursor/);
-  else assert.fail("expected a tie without an identified note");
-});
-
-test("with a row index, nearness is counted in rendered rows so old-side and new-side rows compare", () => {
-  // Rows: -10, -11, -12, +10, +11 (a hunk replacing three lines with two).
-  const rows = rowIndexOf([
-    { side: "old", line: 10 }, { side: "old", line: 11 }, { side: "old", line: 12 }, { side: "new", line: 10 }, { side: "new", line: 11 },
-  ]);
-  const anchors: Record<string, LineAnchor> = {
-    top: { oldRange: [10, 10], preferred: { side: "old", line: 10 } },
-    bottom: { newRange: [11, 11], preferred: { side: "new", line: 11 } },
+    span: { newRange: [10, 20], preferred: { side: "new", line: 10 } },
+    edge: { newRange: [21, 21], preferred: { side: "new", line: 21 } },
+    far: { oldRange: [5, 5], preferred: { side: "old", line: 5 } },
   };
   const by = (id: string) => anchors[id]!;
-  // Cursor on the +10 row: one row from "bottom" (+11), three rows from "top" (-10).
-  assert.deepEqual(nearestToLine(Object.keys(anchors), by, { side: "new", line: 10 }, rows), { kind: "one", item: "bottom", distance: 1 });
-  // Cursor on -12: one row from "top"? no — two rows from -10, one row from +10 but that is not a note; "bottom" is two rows away too: a tie.
-  assert.equal(nearestToLine(Object.keys(anchors), by, { side: "old", line: 12 }, rows).kind, "tie");
-  // Without a row index the old rule applies: an old-side cursor cannot reach a new-side anchor.
-  assert.deepEqual(nearestToLine(Object.keys(anchors), by, { side: "old", line: 12 }), { kind: "one", item: "top", distance: 2 });
+  assert.deepEqual(nearestToLine(Object.keys(anchors), by, { side: "new", line: 20 }), { kind: "one", item: "span", distance: 0 });
+  assert.deepEqual(nearestToLine(Object.keys(anchors), by, { side: "new", line: 23 }), { kind: "one", item: "edge", distance: 2 });
+  assert.equal(nearestToLine(["span", "edge"], by, { side: "new", line: 25 }).kind, "one");
+  assert.equal(nearestToLine(["a", "b"], () => anchors.edge!, { side: "new", line: 30 }).kind, "tie");
+  assert.deepEqual(nearestToLine([], by, { side: "new", line: 1 }), { kind: "none" });
+  // An anchor with nothing on the line's side is infinitely far, never a match on distance.
+  assert.deepEqual(nearestToLine(["far"], by, { side: "new", line: 5 }), { kind: "one", item: "far", distance: Number.POSITIVE_INFINITY });
 });

@@ -1,7 +1,6 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { ExtensionDiffFile, ExtensionPaneProps, ExtensionReviewNote, ExtensionReviewSnapshot, ExtensionReviewSnapshotNote } from "hunkdiff/extension";
-import { onCursorChange, patchLineStops, pendingNoteFix, stopAddress, trackedStop } from "./cursor.ts";
-import { nearestToCursor, nearestToLine, rowIndexOf, type CursorPosition, type LineAddress, type LineAnchor, type RowIndex } from "./threads.ts";
+import type { ExtensionPaneProps, ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
+import { nearestToLine, type LineAnchor } from "./threads.ts";
 
 export interface AssignedComment {
   readonly id: string;
@@ -32,15 +31,15 @@ export interface ThreadBoardSnapshot {
   readonly selectedKey?: string;
   /** True while the keybinding list is shown in place of the thread rows. */
   readonly helpVisible?: boolean;
-  /** The assigned comment nearest the review cursor, as the pane last saw it. */
-  readonly cursorCommentId?: string;
+  /** The comment added most recently; Ctrl+T lands on it, so "comment, Ctrl+T, P" works. */
+  readonly lastAddedCommentId?: string;
 }
 
 /** Shown by `?` while Threads navigation is focused. */
 const HELP_ROWS: readonly (readonly [string, string])[] = [
-  ["j / k", "move selection"],
-  ["↓ / ↑", "move selection"],
-  ["Enter", "expand group or jump to comment"],
+  ["j / k", "move selection; the diff follows the comment"],
+  ["↓ / ↑", "move selection; the diff follows the comment"],
+  ["Enter", "expand or collapse the group"],
   ["A", "agent actions for the group"],
   ["P", "prompt the group"],
   ["X", "resolve the group or comment"],
@@ -113,7 +112,7 @@ function allComments(): { thread: ReviewThread; comment: AssignedComment }[] {
 
 /**
  * The group holding the comment nearest `note` in the same file, or undefined
- * when no group has a comment there. Measured the way the cursor lookup is.
+ * when no group has a comment there, measured by line on the comment's side.
  */
 export function nearestThreadForNote(note: Pick<ExtensionReviewNote, "id" | "filePath" | "side" | "line">): ReviewThread | undefined {
   const inFile = allComments().filter(({ comment }) => comment.filePath === note.filePath && comment.id !== note.id);
@@ -121,90 +120,6 @@ export function nearestThreadForNote(note: Pick<ExtensionReviewNote, "id" | "fil
   // A tie between groups is broken by board order, so a new comment is never left unfiled.
   if (nearest.kind === "tie") return inFile.map(({ thread }) => thread).find(() => true);
   return nearest.kind === "one" ? nearest.item.thread : undefined;
-}
-
-/**
- * The assigned comment the review cursor is on or nearest to, within the selected
- * file and hunk — the same rule `threadAtSelection` uses for commands, including
- * a cursor on a note row. Undefined when the hunk holds no assigned comment, or
- * when two are equally near.
- */
-export function commentAtCursor(filePath: string | undefined, hunkIndex: number | null, cursor: CursorPosition | LineAddress | null | undefined, rows?: RowIndex): AssignedComment | undefined {
-  if (!filePath || hunkIndex === null) return undefined;
-  const inHunk = allComments().filter(({ comment }) => comment.filePath === filePath && comment.hunkIndex === hunkIndex);
-  const position: CursorPosition | null = cursor && "at" in cursor ? cursor : { at: cursor ?? null };
-  const nearest = nearestToCursor(inHunk, ({ comment }) => commentAnchor(comment), position, ({ comment }) => comment.id, rows);
-  return nearest.kind === "one" ? nearest.item.comment : undefined;
-}
-
-/** The review snapshot as of the last command, kept so the pane can rebuild Hunk's stop list. */
-let knownSnapshot: ExtensionReviewSnapshot | undefined;
-/** Between commands, what the note events reveal: notes by id, and which file key each file id has. */
-const learnedNotes = new Map<string, ExtensionReviewSnapshotNote>();
-const learnedFileKeys = new Map<string, string>();
-const pendingFileIds = new Map<string, string>();
-
-export function rememberSnapshot(snapshot: ExtensionReviewSnapshot | null | undefined): void {
-  // Older hosts hand event contexts a bare object; only a real snapshot is worth keeping.
-  if (!snapshot || !Array.isArray(snapshot.files) || !Array.isArray(snapshot.notes)) return;
-  knownSnapshot = snapshot;
-  learnedNotes.clear();
-  for (const file of snapshot.files) learnedFileKeys.set(file.runtimeId, file.fileKey);
-}
-
-/** A saved note names its file by runtime id; the matching `note_changed` names the file key. */
-export function rememberNoteFile(noteId: string, fileId: string): void {
-  pendingFileIds.set(noteId, fileId);
-}
-
-/** Applies one `note_changed` event to what the pane knows. */
-export function rememberNoteChange(kind: "created" | "updated" | "removed", note: ExtensionReviewSnapshotNote): void {
-  const fileId = pendingFileIds.get(note.id);
-  if (fileId) { learnedFileKeys.set(fileId, note.fileKey); pendingFileIds.delete(note.id); }
-  if (knownSnapshot) {
-    const notes = knownSnapshot.notes.filter(candidate => candidate.id !== note.id);
-    knownSnapshot = { ...knownSnapshot, notes: kind === "removed" ? notes : [...notes, note] };
-    return;
-  }
-  if (kind === "removed") learnedNotes.delete(note.id);
-  else learnedNotes.set(note.id, note);
-}
-
-export function forgetSnapshot(): void {
-  knownSnapshot = undefined;
-  learnedNotes.clear();
-  learnedFileKeys.clear();
-  pendingFileIds.clear();
-}
-
-/** The best snapshot the pane has: the last command's, or one assembled from note events. */
-function snapshotForPane(): ExtensionReviewSnapshot | undefined {
-  if (knownSnapshot) return knownSnapshot;
-  if (!learnedNotes.size) return undefined;
-  const files = [...learnedFileKeys].map(([runtimeId, fileKey]) => ({ runtimeId, fileKey })) as unknown as ExtensionReviewSnapshot["files"];
-  return { generation: "", stateRevision: 0, files, notes: [...learnedNotes.values()] };
-}
-
-/**
- * Where the review cursor is for `file`, as the pane can tell: Hunk's current
- * line when it paints one (split layout); the note Hunk just made active when
- * nothing has moved since; otherwise the stop replayed from the last exact
- * position, when it lands in the selected hunk.
- */
-export function paneCursor(file: ExtensionDiffFile | undefined, hunkIndex: number | null, at: LineAddress | null): CursorPosition {
-  if (at) return { at };
-  const justSaved = pendingNoteFix();
-  if (justSaved) return { at: null, noteId: justSaved };
-  const snapshot = snapshotForPane();
-  if (!file || hunkIndex === null || !snapshot) return { at: null };
-  const stop = trackedStop(file, snapshot);
-  return stop && stop.hunkIndex === hunkIndex ? stopAddress(stop) : { at: null };
-}
-
-/** Records which comment the pane is showing as active; a no-op when unchanged. */
-export function setCursorComment(commentId: string | undefined): void {
-  if (board.cursorCommentId === commentId) return;
-  publish({ ...board, cursorCommentId: commentId });
 }
 
 export function suggestedThreadTitle(note: Pick<ExtensionReviewNote, "body" | "filePath">): string {
@@ -237,7 +152,7 @@ export function createThread(title: string, note: ExtensionReviewNote): ReviewTh
     expanded: true,
     comments: [assignedComment(note)],
   };
-  publish({ ...board, threads: [...board.threads, thread] });
+  publish({ ...board, threads: [...board.threads, thread], lastAddedCommentId: note.id });
   return thread;
 }
 
@@ -252,7 +167,7 @@ export function assignComment(threadId: string, note: ExtensionReviewNote): bool
     assigned = true;
     return { ...thread, expanded: true, comments: [...without, comment] };
   });
-  if (assigned) publish({ ...board, threads });
+  if (assigned) publish({ ...board, threads, lastAddedCommentId: note.id });
   return assigned;
 }
 
@@ -269,7 +184,7 @@ export function assignUnassignedThread(note: ExtensionReviewNote): ReviewThread 
     expanded: true,
     comments: [assignedComment(note)],
   };
-  publish({ ...board, threads: [...board.threads, thread] });
+  publish({ ...board, threads: [...board.threads, thread], lastAddedCommentId: note.id });
   return thread;
 }
 
@@ -480,12 +395,12 @@ export function startThreadNavigation(): boolean {
   const items = selections();
   const first = items[0];
   if (!first) return false;
-  // Land on the comment the review cursor is at, so Ctrl+T continues where the user was reading.
-  const atCursor = board.cursorCommentId
-    ? items.find(item => item.kind === "comment" && item.comment.id === board.cursorCommentId)
-      ?? items.find(item => item.kind === "thread" && item.thread.comments.some(comment => comment.id === board.cursorCommentId))
+  // Land on the comment saved last, so "comment, Ctrl+T, P" acts on what you just wrote.
+  const recent = board.lastAddedCommentId
+    ? items.find(item => item.kind === "comment" && item.comment.id === board.lastAddedCommentId)
+      ?? items.find(item => item.kind === "thread" && item.thread.comments.some(comment => comment.id === board.lastAddedCommentId))
     : undefined;
-  publish({ ...board, navigating: true, selectedKey: board.selectedKey ?? selectionKey(atCursor ?? first) });
+  publish({ ...board, navigating: true, selectedKey: board.selectedKey ?? selectionKey(recent ?? first) });
   return true;
 }
 
@@ -522,7 +437,6 @@ export function toggleThread(threadId: string): void {
 
 export function resetThreadBoard(): void {
   navigationByCommentId.clear();
-  forgetSnapshot();
   publish({ threads: [], navigating: false, helpVisible: false });
 }
 
@@ -531,44 +445,38 @@ function oneLine(text: string, width: number): string {
   return normalized.length > width ? `${normalized.slice(0, Math.max(1, width - 1))}…` : normalized;
 }
 
-let revealSelectedComment: (() => void) | undefined;
-
-function revealComment(comment: AssignedComment, files: ExtensionPaneProps["files"], actions: ExtensionPaneProps["actions"]): void {
+/**
+ * Scrolls the review to a comment, at Hunk's live anchor when it has reported
+ * one. This is how the sidebar drives the diff: Hunk reveals a line exactly,
+ * while it never tells an extension which note its own cursor is on.
+ */
+function revealComment(comment: AssignedComment, files: ExtensionPaneProps["files"], actions: ExtensionPaneProps["actions"], quiet = false): void {
   const file = files.find(candidate => candidate.path === comment.filePath);
   if (!file) {
-    actions.notify(`Comment file is not visible: ${comment.filePath}`, "warning");
+    if (!quiet) actions.notify(`Comment file is not visible: ${comment.filePath}`, "warning");
     return;
   }
-  const preferred = navigationByCommentId.get(comment.id)?.preferred;
-  if (preferred) {
-    actions.revealLine(file.id, preferred.side, preferred.line);
-    return;
-  }
-  actions.revealLine(file.id, comment.side, comment.line);
+  const at = navigationByCommentId.get(comment.id)?.preferred ?? { side: comment.side, line: comment.line };
+  actions.revealLine(file.id, at.side, at.line);
 }
 
-/** Activates the keyboard-selected row; threads expand/collapse and comments reveal their source. */
+/** Activates the keyboard-selected row: a group expands or collapses. A comment is already revealed. */
 export function activateSelectedThreadItem(): boolean {
   const selection = selectedThreadItem();
   if (!selection) return false;
   if (selection.kind === "thread") toggleThread(selection.thread.id);
-  else revealSelectedComment?.();
   return true;
 }
 
 /** Session-local prototype UI for grouping saved user comments into orchestration threads. */
-export function ThreadsPane({ files, theme, actions, width, selectedFileId, selectedHunkIndex, currentLine }: ExtensionPaneProps): ReactNode {
+export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps): ReactNode {
   const state = useThreadBoard();
-  // Cursor moves arrive outside React (Hunk reports them as executed commands), so re-render on each.
-  const [, setCursorTick] = useState(0);
-  useEffect(() => onCursorChange(() => setCursorTick(tick => tick + 1)), []);
-  const cursorFile = selectedFileId === null ? undefined : files.find(file => file.id === selectedFileId);
-  const at = currentLine ? { side: currentLine.side, line: currentLine.line } : null;
-  const rows = cursorFile ? rowIndexOf(patchLineStops(cursorFile.patch)) : undefined;
-  const active = commentAtCursor(cursorFile?.path, selectedHunkIndex, paneCursor(cursorFile, selectedHunkIndex, at), rows);
-  useEffect(() => { setCursorComment(active?.id); }, [active?.id]);
-  // A closed pane shows nothing, so it must not keep steering review-side keys.
-  useEffect(() => () => setCursorComment(undefined), []);
+  const selection = selectedThreadItem();
+  const selectedComment = state.navigating && selection?.kind === "comment" ? selection.comment : undefined;
+  // The sidebar is the cursor: moving the selection onto a comment shows it in the diff.
+  useEffect(() => {
+    if (selectedComment) revealComment(selectedComment, files, actions, true);
+  }, [selectedComment?.id]);
   const dispatching = state.threads.some(thread => thread.dispatching);
   const [throbberFrame, setThrobberFrame] = useState(0);
   useEffect(() => {
@@ -576,10 +484,6 @@ export function ThreadsPane({ files, theme, actions, width, selectedFileId, sele
     const timer = setInterval(() => setThrobberFrame(frame => frame + 1), 100);
     return () => clearInterval(timer);
   }, [dispatching]);
-  const selection = selectedThreadItem();
-  revealSelectedComment = selection?.kind === "comment"
-    ? () => revealComment(selection.comment, files, actions)
-    : undefined;
   return (
     <scrollbox
       width="100%"
@@ -614,25 +518,23 @@ export function ThreadsPane({ files, theme, actions, width, selectedFileId, sele
           />
         ) : null}
         {state.helpVisible ? [] : state.threads.flatMap(thread => {
-          // A collapsed group still shows that the cursor's comment is inside it.
-          const holdsCursor = !thread.expanded && thread.comments.some(comment => comment.id === active?.id);
           return [
             <text
               key={thread.id}
               content={` ${thread.expanded ? "▾" : "▸"} ${thread.dispatching ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[throbberFrame % 10] : thread.completed ? "✓" : " "} ${oneLine(thread.title, Math.max(8, width - 12))} (${thread.comments.length})`}
               style={{
-                fg: thread.completed && !thread.dispatching ? theme.badgeAdded : holdsCursor ? theme.accent : theme.text,
+                fg: thread.completed && !thread.dispatching ? theme.badgeAdded : theme.text,
                 bg: state.selectedKey === `thread:${thread.id}` ? theme.panelAlt : theme.panel,
               }}
               onMouseDown={() => toggleThread(thread.id)}
             />,
             ...(thread.expanded ? thread.comments.map(comment => {
-              const isActive = comment.id === active?.id;
+              const selected = comment.id === selectedComment?.id;
               return (
                 <text
                   key={`${thread.id}:${comment.id}`}
-                  content={`   ${isActive ? "›" : "└"} ${oneLine(comment.body, Math.max(8, width - 7))}`}
-                  style={{ fg: isActive ? theme.accent : theme.muted, bg: state.selectedKey === `comment:${thread.id}:${comment.id}` ? theme.panelAlt : theme.panel }}
+                  content={`   ${selected ? "›" : "└"} ${oneLine(comment.body, Math.max(8, width - 7))}`}
+                  style={{ fg: selected ? theme.accent : theme.muted, bg: state.selectedKey === `comment:${thread.id}:${comment.id}` ? theme.panelAlt : theme.panel }}
                   onMouseDown={() => revealComment(comment, files, actions)}
                 />
               );
