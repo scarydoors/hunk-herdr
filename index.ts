@@ -600,7 +600,7 @@ export default function register(hunk: HunkExtensionAPI) {
   });
   hunk.on("note_changed", async ({ kind, note }, ctx) => {
     if (kind !== "removed") {
-      updateThreadCommentNavigation(note.id, note.anchor.preferred);
+      updateThreadCommentNavigation(note.id, note.anchor);
       return;
     }
     // Resolving from the review, not the pane, reaches the board only through here.

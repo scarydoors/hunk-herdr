@@ -78,10 +78,11 @@ resolved state, so resolving removes the root comment
 and every reply, leaf-first,
 after one confirmation. In Threads navigation, **X** resolves the selected group's
 native threads when its heading is focused, or only the selected comment's native
-thread when a comment is focused. From the review, the thread nearest the current
-line in the selected hunk is used, the same one the Threads pane highlights; only an
-exact tie between two threads, or a hunk with several threads and no current line,
-shows a notice and changes nothing.
+thread when a comment is focused. From the review, your own comment nearest the
+current line in the selected hunk is used, the same one the Threads pane highlights;
+agent and AI comments in the hunk count only when none of yours is there. Only an
+exact tie between two of your comments, or several of them in a hunk with no current
+line, shows a notice and changes nothing.
 
 The picker lists agents from the calling pane's **live workspace**, across tabs,
 with their name/kind, state, pane ID and cwd. It excludes Hunk's own pane. Selecting
