@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { ExtensionPaneAvailabilityContext, ExtensionPaneProps, ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
+import type { ExtensionPaneProps, ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
 
 export interface AssignedComment {
   readonly id: string;
@@ -410,18 +410,6 @@ export function activateSelectedThreadItem(): boolean {
 }
 
 /** Session-local prototype UI for grouping saved user comments into orchestration threads. */
-export function nativeThreadResolvableAtCurrentLine({ files, selectedFileId, currentLine }: Pick<ExtensionPaneAvailabilityContext, "files" | "selectedFileId" | "currentLine">): boolean {
-  const selectedFile = files.find(file => file.id === selectedFileId);
-  if (!currentLine || !selectedFile) return false;
-  return board.threads.flatMap(thread => thread.comments).filter(comment => comment.filePath === selectedFile.path
-    && comment.side === currentLine.side && comment.line === currentLine.line).length === 1;
-}
-
-/** One-row bottom hint, mounted only when the native resolve action is unambiguous. */
-export function NativeResolveHintPane({ theme }: ExtensionPaneProps): ReactNode {
-  return <text content=" X resolve native review thread" style={{ fg: theme.accent, bg: theme.panel }} />;
-}
-
 export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps): ReactNode {
   const state = useThreadBoard();
   const dispatching = state.threads.some(thread => thread.dispatching);
