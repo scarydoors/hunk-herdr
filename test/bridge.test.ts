@@ -65,6 +65,13 @@ test("spawn splits before zooming once, preserves cwd/focus and registers owned 
   await assert.rejects(f.bridge.spawn("pi"), /already exists/);
 });
 
+test("spawn forwards a configured model only as agent CLI arguments", async () => {
+  const f = fixture();
+  await f.bridge.spawn("pi", "anthropic/claude-sonnet-4-5");
+  const start = f.calls.find(call => call[0] === "agent" && call[1] === "start");
+  assert.deepEqual(start!.slice(-3), ["--", "--model", "anthropic/claude-sonnet-4-5"]);
+});
+
 test("spawn waits for the split resize to settle before zooming or starting the agent", async () => {
   let resume!: () => void;
   let reached!: () => void;

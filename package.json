@@ -14,6 +14,8 @@
     "bridge.ts",
     "threads.ts",
     "threads-pane.tsx",
+    "model-defaults.ts",
+    "model-catalog.ts",
     "README.md"
   ],
   "scripts": {

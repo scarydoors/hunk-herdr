@@ -13,6 +13,7 @@ Open Hunk in a Herdr pane, then:
 - **T** — show or hide the session-local Threads sidebar.
 - **Ctrl+T** — focus Threads keyboard navigation (`j`/`k` or arrows, then Enter).
 - **Esc** — leave Threads navigation and return to the review; the sidebar stays open.
+- **Ctrl+L** — while Threads navigation is focused, choose a saved default model for Pi or Claude.
 - **X** — resolve the review thread at the current line/hunk.
 - **Extensions → Herdr** commands also expose selection, status, reveal, hide,
   thread controls, and stopping the temporary agent. Menu grouping is named `hunk-herdr`.
@@ -42,19 +43,21 @@ and delivery waits in the background. Each prompt includes an authoritative list
 IDs and explicitly prohibits acting on any other review comments. Press **Ctrl+R** on
 a thread heading to move the whole displayed group, or on a comment to move only
 that comment, into **Unassigned**, another thread, or a new named thread. With a
-Threads item selected, **X** confirms resolving that displayed group and its native
-review comments. **T** only changes sidebar visibility, while Esc only leaves
-keyboard navigation.
+Threads group selected, **X** confirms resolving that displayed group and all its
+native review comments; its temporary agent is closed during cleanup. With a comment
+selected, **X** resolves only that comment's native review thread and leaves other
+displayed group comments open. Existing user-owned agents are never closed. **T**
+only changes sidebar visibility, while Esc only leaves keyboard navigation.
 Assignments and thread names are session-local prototype state: they do not
 change Hunk's native reply relationships and disappear when Hunk exits.
 
 Thread resolution is experimental. Hunk does not currently persist a separate
 resolved state, so resolving removes the root comment
 and every reply, leaf-first,
-after one confirmation. In Threads navigation, **X** instead resolves every native
-thread represented by the selected displayed group, then removes that group. If no
-thread is present, or multiple threads share the current location, the extension
-shows a notice and changes nothing.
+after one confirmation. In Threads navigation, **X** resolves the selected group's
+native threads when its heading is focused, or only the selected comment's native
+thread when a comment is focused. If no thread is present, or multiple threads share
+the current location, the extension shows a notice and changes nothing.
 
 The picker lists agents from the calling pane's **live workspace**, across tabs,
 with their name/kind, state, pane ID and cwd. It excludes Hunk's own pane. Selecting
@@ -126,6 +129,15 @@ in the temporary-agent picker and named in its title. You must still confirm;
 nothing is automatically launched or selected from existing panes.
 Without a default, the configured list order is used.
 
+With Threads navigation focused, press **Ctrl+L** to configure Pi or Claude. The
+model list is populated from Pi's local model store or Claude Code's cached model
+catalog; no model names are hardcoded. Choosing an agent normally afterwards starts
+it with the saved model (`--model <id>`). Choose the list's **Default** entry to clear
+an override. Defaults are local user state, stored at
+`$XDG_STATE_HOME/hunk-herdr/model-defaults.json` (or
+`~/.local/state/hunk-herdr/model-defaults.json` when `XDG_STATE_HOME` is unset), not
+in the repository or Hunk configuration.
+
 Repository `.hunk/config.toml` overrides user settings key by key. Values are
 validated against the fixed supported types; arbitrary commands are not allowed.
 Invalid configuration reports a warning when opening the picker rather than
@@ -170,6 +182,7 @@ No changes to your Nix-managed `config.toml` are needed. Optional key remapping:
 "hunk-herdr.prompt" = "P"
 "hunk-herdr.threads" = "T"
 "hunk-herdr.focus-threads" = "ctrl+t"
+"hunk-herdr.models" = "ctrl+l"
 "hunk-herdr.resolve-thread" = "X"
 ```
 
