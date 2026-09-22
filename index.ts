@@ -19,6 +19,7 @@ import {
   moveThreadComments,
   moveThreadToUnassigned,
   selectedThreadItem,
+  threadForComment,
   UNASSIGNED_THREAD_ID,
   UNASSIGNED_THREAD_TITLE,
   moveThreadSelection,
@@ -266,6 +267,27 @@ export default function register(hunk: HunkExtensionAPI) {
     badge(ctx);
     ctx.notify(`Temporary agent stopped for ${thread.title}.`);
   }
+  /**
+   * A displayed group is only a container for its comments. Once the last one is
+   * resolved — from the Threads pane, from the review, or by the agent itself —
+   * the group goes with it, and any temporary agent Herdr started to serve that
+   * group is closed. Agents the user picked are never touched.
+   */
+  async function retireEmptyGroup(threadId: string, ctx?: { notify: Context["notify"] }): Promise<void> {
+    const thread = threadBoardSnapshot().threads.find(candidate => candidate.id === threadId);
+    if (!thread || thread.comments.length) return;
+    const binding = threadAgents.get(threadId);
+    threadAgents.delete(threadId);
+    removeThreadGroup(threadId);
+    if (!binding?.owned) return;
+    try {
+      await binding.bridge.stop();
+      ctx?.notify(`Resolved every comment in ${thread.title}; its temporary agent was closed.`);
+    } catch (error) {
+      hunk.log(`Temporary pane cleanup for ${thread.title}: ${String(error)}`);
+      ctx?.notify(`${thread.title} is fully resolved, but its temporary agent could not be closed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    }
+  }
   async function resolveThread(ctx: Context): Promise<void> {
     const before = ctx.review.snapshot();
     if (!before) return;
@@ -318,6 +340,7 @@ export default function register(hunk: HunkExtensionAPI) {
     await removeThread(run, ctx.cwd, before.generation, notes);
     removeAssignedComment(commentId);
     if (alive(ctx)) ctx.notify(`Resolved comment in Threads group ${thread.title}.`);
+    await retireEmptyGroup(thread.id, ctx);
   }
   async function resolveSelectedThreadGroup(ctx: Context, before: NonNullable<ReturnType<Context["review"]["snapshot"]>>, thread: ReviewThread): Promise<void> {
     const binding = threadAgent(thread);
@@ -331,7 +354,7 @@ export default function register(hunk: HunkExtensionAPI) {
     }
     const confirmed = await ctx.dialogs.confirm({
       title: `Resolve Threads group: ${thread.title}?`,
-      body: `Removes this displayed group and ${notes.length} native review comment${notes.length === 1 ? "" : "s"}${binding?.owned ? ", then closes its temporary agent" : ""}. This cannot be undone.`,
+      body: `Removes this displayed group and ${notes.length} native review comment${notes.length === 1 ? "" : "s"}${binding?.owned ? `, then closes its temporary agent${thread.dispatching ? ", interrupting the work it is still running" : ""}` : ""}. This cannot be undone.`,
       confirmLabel: "Resolve group",
       cancelLabel: "Leave open",
     });
@@ -462,11 +485,19 @@ export default function register(hunk: HunkExtensionAPI) {
       case 5: return stop(ctx);
     }
   }
-  function command(id: string, title: string, action: (ctx: Context) => Promise<void>, key?: string, needsHerdr = true) {
+  interface CommandOptions {
+    key?: string;
+    /** False for commands that never talk to Herdr, so they work without a Herdr pane. */
+    needsHerdr?: boolean;
+    /** True for commands that neither wait for, nor block, an agent operation. */
+    whilePending?: boolean;
+  }
+  function command(id: string, title: string, action: (ctx: Context) => Promise<void>, options: CommandOptions = {}) {
+    const { key, needsHerdr = true, whilePending = false } = options;
     hunk.registerCommand({ id, title, ...(key ? { key } : {}) }, ctx => {
       if (disposed) return;
-      if (pending) { ctx.notify("Herdr operation in progress…", "warning"); return; }
-      pending = (async () => {
+      if (pending && !whilePending) { ctx.notify("Herdr operation in progress…", "warning"); return; }
+      const running = (async () => {
         try {
           if (needsHerdr) await client(ctx).caller();
           if (alive(ctx)) await action(ctx);
@@ -477,11 +508,14 @@ export default function register(hunk: HunkExtensionAPI) {
             ctx.notify(error instanceof Error ? error.message : String(error), "warning");
           }
         }
-      })().finally(() => { pending = undefined; });
+      })();
+      // A concurrent command must not claim the slot either, or it would block the next one.
+      if (whilePending) return running;
+      pending = running.finally(() => { pending = undefined; });
       return pending;
     });
   }
-  command("menu", "Herdr: agent actions…", menu, "A");
+  command("menu", "Herdr: agent actions…", menu, { key: "A" });
   // Threads is independent of Herdr operations, so it remains closable while one is pending.
   hunk.registerCommand({ id: "threads", title: "Herdr: toggle threads sidebar", key: "T" }, ctx => {
     if (disposed) return;
@@ -503,15 +537,16 @@ export default function register(hunk: HunkExtensionAPI) {
   });
   command("pick", "Herdr: choose agent for selected Threads group…", async ctx => { await choose(ctx); });
   // No key here: Hunk's own "?" wins the binding, so the threads mode claims the key instead.
-  command("help", "Herdr: toggle Threads keybindings", showThreadHelp, undefined, false);
-  command("models", "Herdr: configure Pi/Claude model defaults…", configureModels, "ctrl+l", false);
-  command("prompt", "Herdr: prompt selected Threads group…", prompt, "P");
+  command("help", "Herdr: toggle Threads keybindings", showThreadHelp, { needsHerdr: false });
+  command("models", "Herdr: configure Pi/Claude model defaults…", configureModels, { key: "ctrl+l", needsHerdr: false });
+  command("prompt", "Herdr: prompt selected Threads group…", prompt, { key: "P" });
   command("status", "Herdr: check selected Threads group agent", refresh);
   command("reveal", "Herdr: reveal selected Threads group agent", reveal);
   command("hide", "Herdr: hide siblings / zoom Hunk", ctx => client(ctx).zoom(true));
   command("stop", "Herdr: stop selected Threads group agent…", stop);
-  command("resolve-thread", "Herdr: resolve review thread", resolveThread, "X", false);
-  command("reassign-thread-group", "Herdr: move selected Threads item…", reassignSelectedGroup, "ctrl+r", false);
+  // Resolving is about review state, not agent work, so it runs while an agent is busy.
+  command("resolve-thread", "Herdr: resolve review thread", resolveThread, { key: "X", needsHerdr: false, whilePending: true });
+  command("reassign-thread-group", "Herdr: move selected Threads item…", reassignSelectedGroup, { key: "ctrl+r", needsHerdr: false });
   hunk.registerCliCommand({ name: "herdr-check", summary: "Check Hunk/Herdr integration without opening the TUI" }, async (_args, ctx) => {
     try {
       const api = new Bridge(ctx.cwd);
@@ -528,9 +563,15 @@ export default function register(hunk: HunkExtensionAPI) {
   hunk.on("note_edited", ({ note }) => {
     if (!note.draft) updateAssignedComment(note);
   });
-  hunk.on("note_changed", ({ kind, note }) => {
-    if (kind === "removed") removeAssignedComment(note.id);
-    else updateThreadCommentNavigation(note.id, note.anchor.preferred);
+  hunk.on("note_changed", async ({ kind, note }, ctx) => {
+    if (kind !== "removed") {
+      updateThreadCommentNavigation(note.id, note.anchor.preferred);
+      return;
+    }
+    // Resolving from the review, not the pane, reaches the board only through here.
+    const thread = threadForComment(note.id);
+    removeAssignedComment(note.id);
+    if (thread) await retireEmptyGroup(thread.id, ctx);
   });
   hunk.on("shutdown", async () => {
     disposed = true;

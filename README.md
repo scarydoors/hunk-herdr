@@ -15,7 +15,9 @@ Open Hunk in a Herdr pane, then:
 - **Esc** — leave Threads navigation and return to the review; the sidebar stays open.
 - **Ctrl+L** — while Threads navigation is focused, choose a saved default model for Pi or Claude.
 - **?** — while Threads navigation is focused, toggle its keybinding list in the pane.
-- **X** — resolve the review thread at the current line/hunk.
+- **X** — resolve the review thread at the current line/hunk. Resolving works while an
+  agent is still running; once a group's last comment is resolved the group is retired,
+  and a temporary agent Herdr started for it is closed. Agents you picked keep running.
 - **Extensions → Herdr** commands also expose selection, status, reveal, hide,
   thread controls, and stopping the temporary agent. Menu grouping is named `hunk-herdr`.
 

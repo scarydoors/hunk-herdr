@@ -156,7 +156,73 @@ test("claims \"?\" for the Threads keybinding list instead of losing it to Hunk'
   assert.equal(h.press({ name: "j" }), "handled", "navigation keys keep working");
 });
 
+test("closes a temporary agent once the last comment of its group is resolved", async t => {
+  resetThreadBoard();
+  createThread("Authentication", {
+    id: "user:one", fileId: "runtime:one", filePath: "src/auth.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expiry", draft: false,
+  });
+  startThreadNavigation();
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => []);
+  t.mock.method(Bridge.prototype, "layout", async () => ({ zoomed: true, focused_pane_id: caller.pane_id, area: { width: 100, height: 40 } }));
+  t.mock.method(Bridge.prototype, "spawn", async () => agent);
+  const stop = t.mock.method(Bridge.prototype, "stop", async () => {});
+  const h = host();
+  h.answers.push("+ Create temporary agent (hidden sibling)", "pi");
+  await h.invoke("pick");
+  assert.equal(threadBoardSnapshot().threads.length, 1);
+
+  // Resolving from the review, rather than the pane, reaches Herdr only as this event.
+  await h.emit("note_changed", { kind: "removed", note: { id: "user:one", anchor: { preferred: null } } });
+  assert.equal(stop.mock.callCount(), 1);
+  assert.deepEqual(threadBoardSnapshot().threads, []);
+  assert.match(h.notices.at(-1)!, /temporary agent was closed/);
+});
+
+test("retires an emptied group without ever closing an agent the user picked", async t => {
+  resetThreadBoard();
+  createThread("Authentication", {
+    id: "user:one", fileId: "runtime:one", filePath: "src/auth.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expiry", draft: false,
+  });
+  startThreadNavigation();
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => [agent]);
+  t.mock.method(Bridge.prototype, "validate", async () => agent);
+  const stop = t.mock.method(Bridge.prototype, "stop", async () => {});
+  const h = host();
+  h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
+  await h.invoke("pick");
+
+  await h.emit("note_changed", { kind: "removed", note: { id: "user:one", anchor: { preferred: null } } });
+  assert.equal(stop.mock.callCount(), 0, "agents the user picked outlive the review");
+  assert.deepEqual(threadBoardSnapshot().threads, []);
+});
+
+test("resolving runs while an agent operation is still in flight", async t => {
+  resetThreadBoard();
+  let release!: (pane: Pane) => void;
+  t.mock.method(Bridge.prototype, "caller", () => new Promise<Pane>(resolve => { release = resolve; }));
+  const h = host();
+  const busy = h.invoke("status"); // Holds the slot that used to refuse every other command.
+  await new Promise<void>(resolve => setImmediate(resolve));
+
+  await h.invoke("resolve-thread");
+  assert.ok(!h.notices.includes("Herdr operation in progress…"));
+  assert.equal(h.notices.at(-1), "No review thread at the current location.");
+
+  release(caller);
+  await busy;
+});
+
 test("cancelled picker never spawns or prompts", async t => {
+  resetThreadBoard();
+  createThread("Authentication", {
+    id: "user:one", fileId: "runtime:one", filePath: "src/auth.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expiry", draft: false,
+  });
+  startThreadNavigation();
   t.mock.method(Bridge.prototype, "caller", async () => caller);
   t.mock.method(Bridge.prototype, "agents", async () => [agent]);
   const spawn = t.mock.method(Bridge.prototype, "spawn", async () => agent);
