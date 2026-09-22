@@ -8,8 +8,8 @@ is required: this is a **Hunk** extension, with an editable checkout in `~/work/
 
 Open Hunk in a Herdr pane, then:
 
-- **A** — agent actions: choose an existing agent or create a temporary one.
-- **P** — prompt the selected agent (opens the picker if none is selected).
+- **A** — actions for the currently selected Threads group: choose, prompt, inspect, reveal, or stop its agent.
+- **P** — prompt the currently selected Threads group (opens its agent picker if none is assigned).
 - **T** — show or hide the session-local Threads sidebar.
 - **Ctrl+T** — focus Threads keyboard navigation (`j`/`k` or arrows, then Enter).
 - **Esc** — leave Threads navigation and return to the review; the sidebar stays open.
@@ -29,8 +29,16 @@ Creating or choosing a thread opens the right-hand Threads sidebar.
 Each thread can be expanded or collapsed by clicking its row. Expanded threads
 list their assigned comments; clicking a comment navigates to its source line.
 Use **Ctrl+T** to navigate the sidebar by keyboard: `j`/`k` (or arrows) moves,
-and Enter expands a thread or jumps to a selected comment. **T** only changes
-sidebar visibility, while Esc only leaves keyboard navigation.
+and Enter expands a thread or jumps to a selected comment. With a group selected,
+**P** prompts its assigned agent (or opens the picker) and **A** opens its agent
+actions. The picker can select any eligible running agent in the current workspace
+(and matching worktree cwd when available), or start a new temporary agent. Agents
+started by this extension are labeled with their assigned group when shown in a
+later picker. Each prompt includes an authoritative list of that group's comment
+IDs and explicitly prohibits acting on any other review comments. Press **Ctrl+R** on
+either a thread or one of its comments to move that entire displayed group into
+**Unassigned**, another thread, or a new named thread. **T** only changes sidebar
+visibility, while Esc only leaves keyboard navigation.
 Assignments and thread names are session-local prototype state: they do not
 change Hunk's native reply relationships and disappear when Hunk exits.
 

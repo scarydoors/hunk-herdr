@@ -1,5 +1,5 @@
 import { useSyncExternalStore, type ReactNode } from "react";
-import type { ExtensionPaneProps, ExtensionReviewNote } from "hunkdiff/extension";
+import type { ExtensionPaneProps, ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
 
 export interface AssignedComment {
   readonly id: string;
@@ -33,6 +33,7 @@ export const UNASSIGNED_THREAD_TITLE = "Unassigned";
 
 let board: ThreadBoardSnapshot = { threads: [], navigating: false };
 const listeners = new Set<() => void>();
+const navigationByCommentId = new Map<string, { side: "old" | "new"; line: number }>();
 
 function publish(next: ThreadBoardSnapshot) {
   board = next;
@@ -51,6 +52,24 @@ function useThreadBoard() {
 
 export function threadBoardSnapshot(): ThreadBoardSnapshot {
   return board;
+}
+
+/** Refresh native comment-ID anchors after Hunk updates or reloads the review. */
+export function syncThreadCommentNavigation(snapshot: ExtensionReviewSnapshot | null | undefined): void {
+  // Older Hunk event contexts do not expose snapshots; preserve known anchors then.
+  if (snapshot === undefined) return;
+  navigationByCommentId.clear();
+  if (!snapshot || !Array.isArray(snapshot.notes)) return;
+  for (const note of snapshot.notes) {
+    const preferred = note.anchor.preferred;
+    if (preferred) navigationByCommentId.set(note.id, { side: preferred.side, line: preferred.line });
+  }
+}
+
+/** Updates one current native note anchor by its stable comment ID. */
+export function updateThreadCommentNavigation(commentId: string, preferred: { side: "old" | "new"; line: number } | undefined): void {
+  if (preferred) navigationByCommentId.set(commentId, preferred);
+  else navigationByCommentId.delete(commentId);
 }
 
 export function threadForComment(commentId: string | undefined): ReviewThread | undefined {
@@ -116,6 +135,68 @@ export function assignUnassignedThread(note: ExtensionReviewNote): ReviewThread 
     comments: [assignedComment(note)],
   };
   publish({ ...board, threads: [...board.threads, thread] });
+  return thread;
+}
+
+/** Moves every comment in one displayed group into another, retiring the source group. */
+export function moveThreadComments(sourceId: string, targetId: string): ReviewThread | undefined {
+  if (sourceId === targetId) return board.threads.find(thread => thread.id === sourceId);
+  const source = board.threads.find(thread => thread.id === sourceId);
+  const target = board.threads.find(thread => thread.id === targetId);
+  if (!source || !target) return undefined;
+  const targetCommentIds = new Set(target.comments.map(comment => comment.id));
+  const comments = [...target.comments, ...source.comments.filter(comment => !targetCommentIds.has(comment.id))];
+  const moved = { ...target, expanded: true, comments };
+  publish({
+    ...board,
+    selectedKey: `thread:${targetId}`,
+    threads: board.threads.flatMap(thread => {
+      if (thread.id === sourceId) return [];
+      return [thread.id === targetId ? moved : thread];
+    }),
+  });
+  return moved;
+}
+
+/** Moves a displayed group into Unassigned, creating that session-wide group if needed. */
+export function moveThreadToUnassigned(sourceId: string): ReviewThread | undefined {
+  const existing = board.threads.find(thread => thread.id === UNASSIGNED_THREAD_ID);
+  if (existing) return moveThreadComments(sourceId, existing.id);
+  const source = board.threads.find(thread => thread.id === sourceId);
+  if (!source) return undefined;
+  const thread: ReviewThread = {
+    id: UNASSIGNED_THREAD_ID,
+    title: UNASSIGNED_THREAD_TITLE,
+    expanded: true,
+    comments: source.comments,
+  };
+  publish({
+    ...board,
+    selectedKey: `thread:${thread.id}`,
+    threads: board.threads.flatMap(candidate => candidate.id === sourceId ? [thread] : [candidate]),
+  });
+  return thread;
+}
+
+/** Creates a named group containing every comment in an existing displayed group. */
+export function createThreadFromGroup(sourceId: string, title: string): ReviewThread | undefined {
+  const source = board.threads.find(thread => thread.id === sourceId);
+  if (!source) return undefined;
+  const baseId = `thread:group:${source.comments[0]?.id ?? source.id}`;
+  let id = baseId;
+  let suffix = 2;
+  while (board.threads.some(thread => thread.id === id)) id = `${baseId}:${suffix++}`;
+  const thread: ReviewThread = {
+    id,
+    title: title.trim() || source.title,
+    expanded: true,
+    comments: source.comments,
+  };
+  publish({
+    ...board,
+    selectedKey: `thread:${thread.id}`,
+    threads: board.threads.flatMap(candidate => candidate.id === sourceId ? [thread] : [candidate]),
+  });
   return thread;
 }
 
@@ -191,6 +272,7 @@ export function toggleThread(threadId: string): void {
 }
 
 export function resetThreadBoard(): void {
+  navigationByCommentId.clear();
   publish({ threads: [], navigating: false });
 }
 
@@ -205,6 +287,11 @@ function revealComment(comment: AssignedComment, files: ExtensionPaneProps["file
   const file = files.find(candidate => candidate.path === comment.filePath);
   if (!file) {
     actions.notify(`Comment file is not visible: ${comment.filePath}`, "warning");
+    return;
+  }
+  const anchor = navigationByCommentId.get(comment.id);
+  if (anchor) {
+    actions.revealLine(file.id, anchor.side, anchor.line);
     return;
   }
   actions.revealLine(file.id, comment.side, comment.line);
@@ -241,7 +328,7 @@ export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps
     >
       <box style={{ width: "100%", flexDirection: "column", backgroundColor: theme.panel }}>
         <text
-          content={state.navigating ? " Threads · j/k move · Enter open · Esc return" : " Threads · Ctrl+T to navigate"}
+          content={state.navigating ? " Threads · j/k move · P prompt · A agent · Ctrl+R reassign · Enter open · Esc return" : " Threads · Ctrl+T to navigate"}
           style={{ fg: theme.accent, bg: theme.panel }}
         />
         {state.threads.length === 0 ? (

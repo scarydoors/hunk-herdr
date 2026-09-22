@@ -4,6 +4,8 @@ import type { ExtensionReviewNote } from "hunkdiff/extension";
 import {
   assignComment,
   createThread,
+  createThreadFromGroup,
+  moveThreadComments,
   moveThreadSelection,
   removeAssignedComment,
   resetThreadBoard,
@@ -48,6 +50,21 @@ test("navigates expanded thread rows and clears the selection on mode exit", () 
   stopThreadNavigation();
   assert.equal(selectedThreadItem(), undefined);
   assert.equal(threadBoardSnapshot().navigating, false);
+});
+
+test("moves a whole displayed group to an existing or new thread", () => {
+  resetThreadBoard();
+  const source = createThread("Authentication", note("one", "Check auth handling"));
+  assignComment(source.id, note("two", "Add a regression test"));
+  const target = createThread("Tests", note("three", "Exercise failures"));
+  const moved = moveThreadComments(source.id, target.id);
+  assert.deepEqual(moved?.comments.map(comment => comment.id), ["three", "one", "two"]);
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => thread.title), ["Tests"]);
+
+  const renamed = createThreadFromGroup(target.id, "Authentication tests");
+  assert.equal(renamed?.title, "Authentication tests");
+  assert.deepEqual(renamed?.comments.map(comment => comment.id), ["three", "one", "two"]);
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => thread.title), ["Authentication tests"]);
 });
 
 test("updates and removes assigned comments without deleting the thread", () => {

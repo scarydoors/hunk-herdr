@@ -45,14 +45,23 @@ export function workspaceAgents(agents: Pane[], caller: Pane): Pane[] {
 export function label(a: Pane): string {
   return `${a.name || a.agent} · ${a.agent_status || "unknown"} · ${a.pane_id} · ${a.foreground_cwd || a.cwd || ""}`;
 }
-export function buildPrompt(skill: string, cwd: string, text: string, selection: { file?: string; hunk?: number } = {}): string {
+export interface ThreadPromptScope {
+  title: string;
+  comments: readonly { id: string; body: string; filePath: string; side: "old" | "new"; line: number }[];
+}
+
+export function buildPrompt(skill: string, cwd: string, text: string, selection: { file?: string; hunk?: number; thread?: ThreadPromptScope } = {}): string {
   return [
     "The user is prompting you from a live Hunk review in Herdr.",
     "Before doing the task, run `hunk skill path` and read the returned file completely (the hunk-review skill).",
     `Hunk resolved that skill here: ${JSON.stringify(skill)}.`,
     `Review working directory: ${JSON.stringify(cwd)}. Your own cwd may differ.`,
     "Use `hunk session list --json` to locate this review; use its exact session ID for subsequent commands. If multiple sessions match and you cannot identify this window, ask rather than guess.",
-    "IMPORTANT: Read the review's user-authored comments and treat them as requests addressed to you. Reply to each relevant user comment in its existing thread with `hunk session comment add ... --reply-to <note-id>`; do not answer with detached root comments or leave relevant user comments unanswered.",
+    selection.thread ? [
+      `THREAD SCOPE (authoritative): ${JSON.stringify(selection.thread.title)}.`,
+      `Only review and act on these comments: ${JSON.stringify(selection.thread.comments)}.`,
+      "Do not reply to, create comments for, resolve, or otherwise act on any review comment outside this list. Ignore comments authored by other agents unless their id is explicitly listed. Reply only to relevant listed comments in their existing native Hunk threads with `hunk session comment add ... --reply-to <note-id>`; never add a detached root comment.",
+    ].join("\n") : "IMPORTANT: Read the review's user-authored comments and treat them as requests addressed to you. Reply to each relevant user comment in its existing thread with `hunk session comment add ... --reply-to <note-id>`; do not answer with detached root comments or leave relevant user comments unanswered.",
     "Do not launch the Hunk TUI, restart its daemon, or change Herdr focus/zoom. Stay in the background unless the user asks otherwise.",
     selection.file ? `Selection when the prompt was composed: ${JSON.stringify(selection.file)}${selection.hunk === undefined ? "" : `, hunk ${selection.hunk + 1}`}.` : "",
     "\nUser request:", text,
