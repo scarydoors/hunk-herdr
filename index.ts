@@ -3,9 +3,10 @@ import { matchesKey } from "hunkdiff/extension";
 import type { ExtensionCommandContext, ExtensionEventContext, ExtensionReviewNote, ExtensionReviewSelection, ExtensionReviewSnapshot, ExtensionReviewSnapshotNote, HunkExtensionAPI } from "hunkdiff/extension";
 import { Bridge, buildPrompt, label, run, sameAgent, type Pane } from "./bridge.ts";
 import { agentConfig, type AgentKind } from "./config.ts";
+import { patchLineStops, recordCommand, recordFix, resetCursorTracking, stopAddress, trackedStop } from "./cursor.ts";
 import { modelOptions } from "./model-catalog.ts";
 import { isConfigurableAgentKind, loadModelDefaults, saveModelDefaults, type ConfigurableAgentKind, type ModelDefaults } from "./model-defaults.ts";
-import { removeThread, threadAtSelection, threadsForCommentIds } from "./threads.ts";
+import { removeThread, rowIndexOf, threadAtSelection, threadsForCommentIds, type CursorPosition, type RowIndex } from "./threads.ts";
 import {
   ThreadsPane,
   activateSelectedThreadItem,
@@ -15,8 +16,10 @@ import {
   assignUnassignedThread,
   createThreadFromComment,
   createThreadFromGroup,
-  cursorPosition,
-  observeCursorCommand,
+  forgetSnapshot,
+  rememberNoteChange,
+  rememberNoteFile,
+  rememberSnapshot,
   moveComment,
   moveCommentToUnassigned,
   moveThreadComments,
@@ -143,8 +146,7 @@ export default function register(hunk: HunkExtensionAPI) {
     if (shownThread && shownComment) return { kind: "comment", thread: shownThread, comment: shownComment };
     const snapshot = ctx.review.snapshot();
     if (!snapshot) return undefined;
-    const cursor = cursorPosition(ctx.selection.file?.id ?? null, ctx.selection.hunkIndex, ctx.selection.currentLine);
-    const match = threadAtSelection(snapshot, ctx.selection, cursor);
+    const match = threadAtSelection(snapshot, ctx.selection, cursorPosition(ctx, snapshot), selectionRows(ctx));
     if (match.kind !== "found") {
       ctx.notify(match.kind === "none" ? "No review comment at the cursor. Save one, or focus Threads (Ctrl+T)." : match.message, "warning");
       return undefined;
@@ -162,6 +164,30 @@ export default function register(hunk: HunkExtensionAPI) {
   }
   function selectedGroup(ctx: Context): ReviewThread | undefined {
     return resolveThreadSelection(ctx)?.thread;
+  }
+  /**
+   * Where the review cursor is for this command. Hunk states the line outright
+   * except on a note row; there the stop list replayed in cursor.ts names the
+   * note, and Hunk's own "a note is active" flag (the edit/reply commands being
+   * enabled) confirms the replay before it is trusted.
+   */
+  /** Row order of the selected file, so nearness is counted in rows across both sides. */
+  function selectionRows(ctx: Context): RowIndex | undefined {
+    return ctx.selection.file ? rowIndexOf(patchLineStops(ctx.selection.file.patch)) : undefined;
+  }
+  function cursorPosition(ctx: Context, snapshot: ExtensionReviewSnapshot): CursorPosition {
+    rememberSnapshot(snapshot);
+    const { file, hunkIndex, currentLine } = ctx.selection;
+    if (!file || hunkIndex === null) return { at: null };
+    if (currentLine) {
+      recordFix({ kind: "line", fileId: file.id, hunkIndex, side: currentLine.side, line: currentLine.line });
+      return { at: currentLine };
+    }
+    const onNote = ctx.commands?.isEnabled("hunk.review.editActiveNote") || ctx.commands?.isEnabled("hunk.review.replyToActiveNote");
+    const stop = trackedStop(file, snapshot);
+    if (!stop || stop.hunkIndex !== hunkIndex) return { at: null };
+    if ((stop.kind === "note") !== Boolean(onNote)) return { at: null };
+    return stopAddress(stop);
   }
   /** Rebuilds the lifecycle-event shape of a note from the authoritative snapshot. */
   function noteFromSnapshot(snapshot: ExtensionReviewSnapshot, root: ExtensionReviewSnapshotNote, selection: ExtensionReviewSelection): ExtensionReviewNote {
@@ -385,8 +411,7 @@ export default function register(hunk: HunkExtensionAPI) {
         ? resolveSelectedThreadGroup(ctx, before, selected.thread)
         : resolveSelectedThreadComment(ctx, before, selected.thread, selected.comment.id);
     }
-    const cursor = cursorPosition(ctx.selection.file?.id ?? null, ctx.selection.hunkIndex, ctx.selection.currentLine);
-    const match = threadAtSelection(before, ctx.selection, cursor);
+    const match = threadAtSelection(before, ctx.selection, cursorPosition(ctx, before), selectionRows(ctx));
     if (match.kind !== "found") {
       ctx.notify(match.message, match.kind === "ambiguous" ? "warning" : undefined);
       return;
@@ -607,14 +632,22 @@ export default function register(hunk: HunkExtensionAPI) {
       return { kind: "exit", code: 1 };
     }
   });
-  // Built-in cursor moves say which way the cursor left its last source line, which
-  // is what identifies a note row: Hunk's selection reports no line while on one.
-  hunk.on("command_executed", ({ commandId, canonicalCommandId }) => observeCursorCommand(canonicalCommandId ?? commandId));
-  hunk.on("note_created", ({ note }, ctx) => assignUserComment(note, ctx));
+  // Hunk's selection reports no line while the cursor is on a note row, so the
+  // cursor is tracked through the moves Hunk reports and the positions it states:
+  // a saved note becomes the active one, and a command's current line is exact.
+  hunk.on("command_executed", ({ commandId, canonicalCommandId }) => recordCommand(canonicalCommandId ?? commandId));
+  hunk.on("note_created", ({ note }, ctx) => {
+    if (note.draft) return;
+    recordFix({ kind: "note", noteId: note.id });
+    rememberNoteFile(note.id, note.fileId);
+    assignUserComment(note, ctx);
+  });
+  hunk.on("session_reload", () => { resetCursorTracking(); forgetSnapshot(); });
   hunk.on("note_edited", ({ note }) => {
     if (!note.draft) updateAssignedComment(note);
   });
   hunk.on("note_changed", async ({ kind, note }, ctx) => {
+    rememberNoteChange(kind, note);
     if (kind !== "removed") {
       updateThreadCommentNavigation(note.id, note.anchor);
       return;

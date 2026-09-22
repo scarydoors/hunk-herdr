@@ -6,6 +6,7 @@ import type { ExtensionKeyEvent, ExtensionCommandContext, ExtensionKeyboardMode,
 
 type KeyboardMode = { id: string; onKey: ExtensionKeyboardMode["onKey"]; onEnter?: () => void; onExit?: () => void };
 import { createThread, resetThreadBoard, setCursorComment, threadBoardSnapshot } from "../threads-pane.tsx";
+import { resetCursorTracking } from "../cursor.ts";
 import { DEFAULT_REQUEST } from "../index.ts";
 
 const caller: Pane = { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", terminal_id: "caller" };
@@ -28,9 +29,12 @@ function host(config: Record<string, unknown> = {}) {
     live: true, inputCalls: 0, cliRegistered: false, paneRegistered: false, keyboardModeRegistered: false,
     snapshot: {} as ExtensionReviewSnapshot,
     selection: { file: null, hunkIndex: null, currentLine: null } as ExtensionReviewSelection,
+    /** Which built-in commands Hunk would report enabled, e.g. editActiveNote while a note is active. */
+    enabled: new Set<string>(),
   };
   const ctx = {
     cwd: "/review", review: { snapshot: () => state.live ? state.snapshot : null },
+    commands: { isEnabled: (id: string) => state.enabled.has(id), execute: () => false },
     get selection() { return state.selection; }, notify: (text: string) => notices.push(text),
     panes: {
       open: (id: string) => { openPanes.add(id); openedPanes.push(id); },
@@ -89,8 +93,11 @@ function reviewAt(notes: readonly { id: string; line: number; source?: Extension
   };
 }
 
-function cursorAt(line: number): ExtensionReviewSelection {
-  return { file: { id: "runtime:one", path: "src/auth.ts" } as ExtensionReviewSelection["file"], hunkIndex: 0, currentLine: { side: "new", line } };
+/** The reviewed file: one hunk adding new lines 10-45, so every note in these tests sits on an added row. */
+const authFile = { id: "runtime:one", path: "src/auth.ts", patch: `@@ -9,0 +10,36 @@\n${Array.from({ length: 36 }, (_, i) => `+line ${i + 10}`).join("\n")}\n` } as unknown as NonNullable<ExtensionReviewSelection["file"]>;
+
+function cursorAt(line: number | null): ExtensionReviewSelection {
+  return { file: authFile, hunkIndex: 0, currentLine: line === null ? null : { side: "new", line } };
 }
 
 test("registers discoverable commands and diagnostic CLI without requiring status-row API", () => {
@@ -210,22 +217,49 @@ test("the comment the pane shows as active is the one a review-side key acts on"
   setCursorComment(undefined);
 });
 
-test("with no highlight, a cursor on a note row still resolves from how it got there", async () => {
+test("on a note row, the cursor is replayed from the last exact position and checked against Hunk's active-note flag", async () => {
   resetThreadBoard();
+  resetCursorTracking();
   const h = host();
   h.state.snapshot = reviewAt([{ id: "user:a", line: 10 }, { id: "user:b", line: 11 }]);
-  // The pane saw line 11, then a step up left it for the note row under line 10.
+  // Ctrl+R on line 11 records that exact position (and files the comment there, b, in
+  // Unassigned); then Hunk reports one step up, which lands on the note row under line 10.
+  h.state.selection = cursorAt(11);
+  h.answers.push("Leave unchanged");
+  await h.invoke("reassign-thread-group");
   await h.emit("command_executed", { commandId: "hunk.review.stepUp" });
-  h.state.selection = { ...cursorAt(11), currentLine: null };
-  const { observeCurrentLine } = await import("../threads-pane.tsx");
-  observeCurrentLine("runtime:one", 0, { side: "new", line: 11 });
-  await h.emit("command_executed", { commandId: "hunk.review.stepUp" });
+  // Hunk now has a note active and no current line.
+  h.state.selection = cursorAt(null);
+  h.state.enabled.add("hunk.review.editActiveNote");
   h.answers.push("+ Create new thread…");
   h.inputs.push("Authentication");
   await h.invoke("reassign-thread-group");
   assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.map(comment => comment.id)]), [
-    ["Unassigned", []], ["Authentication", ["user:a"]],
+    ["Unassigned", ["user:b"]], ["Authentication", ["user:a"]],
   ]);
+  // The replay says "line" but Hunk says a note is active: the replay is not trusted.
+  await h.emit("command_executed", { commandId: "hunk.review.stepUp" });
+  await h.invoke("reassign-thread-group");
+  assert.match(h.notices.at(-1)!, /did not say which is under the cursor/);
+  resetCursorTracking();
+});
+
+test("saving a comment makes it the cursor's note, so Ctrl+R right after names that comment", async () => {
+  resetThreadBoard();
+  resetCursorTracking();
+  const h = host();
+  createThread("Authentication", authNote);
+  h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }, { id: "user:two", line: 40 }]);
+  await h.emit("note_created", { note: { ...authNote, id: "user:two", line: 40, body: "Cover the failure path" } });
+  h.state.selection = cursorAt(null);
+  h.state.enabled.add("hunk.review.editActiveNote");
+  setCursorComment(undefined);
+  h.answers.push("Unassigned");
+  await h.invoke("reassign-thread-group");
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.map(comment => comment.id)]), [
+    ["Authentication", ["user:one"]], ["Unassigned", ["user:two"]],
+  ]);
+  resetCursorTracking();
 });
 
 test("Ctrl+L configures models without Threads focus", async () => {
