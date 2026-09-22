@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { ExtensionReviewNote } from "hunkdiff/extension";
+import type { ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
 import {
   assignComment,
   createThread,
@@ -18,6 +18,7 @@ import {
   startThreadNavigation,
   stopThreadNavigation,
   suggestedThreadTitle,
+  syncCommentsWithReview,
   threadBoardSnapshot,
   threadForComment,
   toggleThread,
@@ -173,4 +174,29 @@ test("Threads navigation starts on the comment added last", () => {
   startThreadNavigation();
   assert.equal(selectedThreadItem()?.kind, "thread");
   stopThreadNavigation();
+});
+
+test("a review snapshot refreshes anchors and marks comments Hunk calls stale or no longer renders", () => {
+  resetThreadBoard();
+  const created = createThread("Authentication", { ...note("one", "Check auth handling"), line: 10 });
+  assignComment(created.id, { ...note("two", "Add a regression test"), line: 40 });
+  assignComment(created.id, { ...note("gone", "Reverted hunk"), line: 70 });
+  const snapshotNote = (id: string, line: number, resolution: "active" | "stale"): ExtensionReviewSnapshot["notes"][number] => ({
+    id, source: "user", fileKey: "file:one", summary: id, editable: true, resolution,
+    anchor: { newRange: [line, line], preferred: { side: "new", line }, intersectingHunkIndices: [0], ownerHunkIndex: 0 },
+  });
+  const snapshot: ExtensionReviewSnapshot = {
+    generation: "g", stateRevision: 2,
+    files: [{ fileKey: "file:one", runtimeId: "runtime:one", path: "src/one.ts", changeKind: "change", stats: { additions: 1, deletions: 0, truncated: false }, flags: { untracked: false, binary: false, tooLarge: false, partial: false }, contentIdentity: "c" }],
+    notes: [snapshotNote("one", 10, "active"), snapshotNote("two", 40, "stale")],
+  };
+  syncCommentsWithReview(snapshot);
+  assert.deepEqual(threadBoardSnapshot().threads[0]?.comments.map(comment => [comment.id, comment.resolution]), [["one", "active"], ["two", "stale"], ["gone", "orphaned"]]);
+  // The live anchor now steers auto-assignment, as it steers the reveal.
+  updateThreadCommentNavigation("one", { preferred: { side: "new", line: 60 } });
+  assert.equal(nearestThreadForNote({ id: "new", filePath: "src/one.ts", side: "new", line: 58 })?.id, created.id);
+  // Nothing to read yet leaves the board alone.
+  const before = threadBoardSnapshot();
+  syncCommentsWithReview(null);
+  assert.equal(threadBoardSnapshot(), before);
 });

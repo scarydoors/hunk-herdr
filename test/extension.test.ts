@@ -188,6 +188,16 @@ test("Ctrl+T lands on the comment saved last, so P right after acts on its group
   assert.match(h.inputTitles.at(-1)!, /· Unassigned$/);
 });
 
+test("Ctrl+T reads the review first, so a reload's stale verdicts show before you act", async () => {
+  resetThreadBoard();
+  const h = host();
+  createThread("Authentication", authNote);
+  const review = reviewAt([{ id: "user:one", line: 12 }]);
+  h.state.snapshot = { ...review, notes: review.notes.map(note => ({ ...note, resolution: "stale" as const })) };
+  await h.invoke("focus-threads");
+  assert.equal(threadBoardSnapshot().threads[0]?.comments[0]?.resolution, "stale");
+});
+
 test("X from the review resolves the native thread at the current line, as before", async () => {
   resetThreadBoard();
   const h = host();

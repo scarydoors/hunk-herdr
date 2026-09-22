@@ -12,6 +12,12 @@ export interface AssignedComment {
   readonly line: number;
   /** Line geometry when the comment was saved; Hunk's later anchors are tracked separately. */
   readonly anchor: LineAnchor;
+  /**
+   * Hunk's reconciliation verdict from the last review snapshot seen: a stale
+   * note still sits at its line but the content there changed; an orphaned one
+   * is no longer rendered at all. Undefined until a snapshot has been read.
+   */
+  readonly resolution?: "active" | "stale" | "orphaned";
 }
 
 export interface ReviewThread {
@@ -81,13 +87,28 @@ export function threadBoardSnapshot(): ThreadBoardSnapshot {
   return board;
 }
 
-/** Refresh native comment-ID anchors after Hunk updates or reloads the review. */
-export function syncThreadCommentNavigation(snapshot: ExtensionReviewSnapshot | null | undefined): void {
-  // Older Hunk event contexts do not expose snapshots; preserve known anchors then.
-  if (snapshot === undefined) return;
-  navigationByCommentId.clear();
+/**
+ * Bring the board in line with an authoritative review snapshot: every note's
+ * current anchor, and each assigned comment's reconciliation verdict. A reload
+ * that remaps or drops notes emits no note event, and event handlers cannot
+ * take a snapshot, so commands call this on entry — Ctrl+T included — which is
+ * when the verdicts are about to matter.
+ */
+export function syncCommentsWithReview(snapshot: ExtensionReviewSnapshot | null | undefined): void {
   if (!snapshot || !Array.isArray(snapshot.notes)) return;
+  const byId = new Map(snapshot.notes.map(note => [note.id, note]));
   for (const note of snapshot.notes) navigationByCommentId.set(note.id, note.anchor);
+  let changed = false;
+  const threads = board.threads.map(thread => {
+    const comments = thread.comments.map(comment => {
+      const resolution = byId.get(comment.id)?.resolution ?? "orphaned";
+      if (comment.resolution === resolution) return comment;
+      changed = true;
+      return { ...comment, resolution };
+    });
+    return changed ? { ...thread, comments } : thread;
+  });
+  if (changed) publish({ ...board, threads });
 }
 
 /** Updates one current native note anchor by its stable comment ID. */
@@ -530,11 +551,16 @@ export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps
             />,
             ...(thread.expanded ? thread.comments.map(comment => {
               const selected = comment.id === selectedComment?.id;
+              // Hunk's own verdict, as it marks a note whose line changed under it (●) or no longer shows (✗).
+              const mark = comment.resolution === "stale" ? "● " : comment.resolution === "orphaned" ? "✗ " : "";
               return (
                 <text
                   key={`${thread.id}:${comment.id}`}
-                  content={`   ${selected ? "›" : "└"} ${oneLine(comment.body, Math.max(8, width - 7))}`}
-                  style={{ fg: selected ? theme.accent : theme.muted, bg: state.selectedKey === `comment:${thread.id}:${comment.id}` ? theme.panelAlt : theme.panel }}
+                  content={`   ${selected ? "›" : "└"} ${mark}${oneLine(comment.body, Math.max(8, width - 7 - mark.length))}`}
+                  style={{
+                    fg: comment.resolution === "orphaned" ? theme.badgeRemoved : selected ? theme.accent : comment.resolution === "stale" ? theme.text : theme.muted,
+                    bg: state.selectedKey === `comment:${thread.id}:${comment.id}` ? theme.panelAlt : theme.panel,
+                  }}
                   onMouseDown={() => revealComment(comment, files, actions)}
                 />
               );

@@ -30,6 +30,7 @@ import {
   removeThreadGroup,
   startThreadNavigation,
   stopThreadNavigation,
+  syncCommentsWithReview,
   setThreadCompleted,
   setThreadDispatching,
   updateThreadCommentNavigation,
@@ -503,6 +504,8 @@ export default function register(hunk: HunkExtensionAPI) {
       if (pending && !whilePending) { ctx.notify("Herdr operation in progress…", "warning"); return; }
       const running = (async () => {
         try {
+          // A reload may have marked comments stale or dropped them since the last event.
+          syncCommentsWithReview(ctx.review.snapshot());
           if (needsHerdr) await client(ctx).caller();
           if (alive(ctx)) await action(ctx);
         }
@@ -532,6 +535,7 @@ export default function register(hunk: HunkExtensionAPI) {
   });
   hunk.registerCommand({ id: "focus-threads", title: "Herdr: focus threads", key: "ctrl+t" }, ctx => {
     if (disposed) return;
+    syncCommentsWithReview(ctx.review.snapshot());
     ctx.panes.open("threads");
     if (!threadBoardSnapshot().threads.length) {
       ctx.notify("No threads are available to navigate.", "warning");
