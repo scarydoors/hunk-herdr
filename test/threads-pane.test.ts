@@ -5,6 +5,9 @@ import {
   assignComment,
   commentAtCursor,
   createThread,
+  cursorPosition,
+  observeCurrentLine,
+  observeCursorCommand,
   createThreadFromComment,
   createThreadFromGroup,
   moveComment,
@@ -196,4 +199,29 @@ test("Threads navigation starts on the comment at the review cursor", () => {
   setCursorComment(undefined);
   startThreadNavigation();
   assert.equal(selectedThreadItem()?.kind, "thread");
+});
+
+test("the pane resolves a note row from the last rendered line and the move that left it", () => {
+  resetThreadBoard();
+  const created = createThread("Authentication", { ...note("one", "Check auth handling"), line: 10 });
+  assignComment(created.id, { ...note("two", "Add a regression test"), line: 11 });
+  const at = (line: number) => ({ side: "new" as const, line });
+  // Frames: line 10 rendered, then j, then the pane sees no current line.
+  observeCurrentLine("runtime:one", 0, at(10));
+  observeCursorCommand("hunk.review.stepDown");
+  assert.deepEqual(cursorPosition("runtime:one", 0, null), { at: null, from: at(10), direction: 1 });
+  assert.equal(commentAtCursor("src/one.ts", 0, cursorPosition("runtime:one", 0, null))?.id, "one");
+  // Frames: line 11 rendered, then k: the note row under line 10.
+  observeCurrentLine("runtime:one", 0, at(11));
+  observeCursorCommand("hunk.review.stepUp");
+  assert.equal(commentAtCursor("src/one.ts", 0, cursorPosition("runtime:one", 0, null))?.id, "one");
+  // A new line rendered after the move means the move did not lead onto a note row.
+  observeCurrentLine("runtime:one", 0, at(12));
+  assert.deepEqual(cursorPosition("runtime:one", 0, null), { at: null, from: at(12) });
+  // Another hunk's memory does not apply; the direction alone still does.
+  observeCursorCommand("hunk.review.nextNote");
+  assert.deepEqual(cursorPosition("runtime:one", 3, null), { at: null, direction: 1 });
+  // Unrelated commands are ignored, and a current line always wins.
+  observeCursorCommand("hunk.app.toggleHelp");
+  assert.deepEqual(cursorPosition("runtime:one", 0, at(12)), { at: at(12) });
 });

@@ -42,12 +42,18 @@ in the selected hunk is drawn as active, and a collapsed group that holds it is
 tinted. Each thread can be expanded or collapsed by clicking its row. Expanded threads
 list their assigned comments; clicking a comment navigates to its source line.
 
-**P**, **A**, **Ctrl+R** and **X** act on the comment under the review cursor, or on
-the keyboard-selected row while Threads navigation (**Ctrl+T**) is focused. A line
-with no comment shows a notice and does nothing. A comment saved before this session
-is filed in Unassigned the first time one of these keys reaches it. Use **Ctrl+T** to
-navigate the sidebar by keyboard: `j`/`k` (or arrows) moves, and Enter expands a thread
-or jumps to a selected comment.
+**P**, **A**, **Ctrl+R** and **X** act on the comment the sidebar shows as active, or
+on the keyboard-selected row while Threads navigation (**Ctrl+T**) is focused. That
+is a rule, not a coincidence: the highlight is read back rather than recomputed, so
+what you see is what a key touches. This includes a cursor resting on the comment's
+own row, where Hunk reports no current line: the extension remembers the last source
+line and which way `j`/`k` (or next/previous note) moved off it, and a note row always
+sits directly below its anchor line. With nothing highlighted, the same rule is applied
+to the review itself, which also covers a comment saved before this session (filed in
+Unassigned first) and an agent's comment when none of yours is in the hunk. A line
+with no comment shows a notice and does nothing. Use **Ctrl+T** to navigate the
+sidebar by keyboard: `j`/`k` (or arrows) moves, and Enter expands a thread or jumps to
+a selected comment.
 
 **P** prompts the group's assigned agent, or opens the picker if it has none. The
 picker's first row starts the configured default agent (or the only configured kind),
@@ -78,11 +84,10 @@ resolved state, so resolving removes the root comment
 and every reply, leaf-first,
 after one confirmation. In Threads navigation, **X** resolves the selected group's
 native threads when its heading is focused, or only the selected comment's native
-thread when a comment is focused. From the review, your own comment nearest the
-current line in the selected hunk is used, the same one the Threads pane highlights;
-agent and AI comments in the hunk count only when none of yours is there. Only an
-exact tie between two of your comments, or several of them in a hunk with no current
-line, shows a notice and changes nothing.
+thread when a comment is focused. From the review, the comment the Threads pane
+highlights is used; agent and AI comments in the hunk count only when none of yours is
+there. Only an exact tie between two of your comments, or a note row the cursor
+reached in a way the extension did not observe, shows a notice and changes nothing.
 
 The picker lists agents from the calling pane's **live workspace**, across tabs,
 with their name/kind, state, pane ID and cwd. It excludes Hunk's own pane. Selecting

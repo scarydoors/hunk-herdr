@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { ExtensionPaneProps, ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
-import { nearestToLine, type LineAddress, type LineAnchor } from "./threads.ts";
+import { nearestToCursor, nearestToLine, type CursorPosition, type LineAddress, type LineAnchor } from "./threads.ts";
 
 export interface AssignedComment {
   readonly id: string;
@@ -124,14 +124,55 @@ export function nearestThreadForNote(note: Pick<ExtensionReviewNote, "id" | "fil
 
 /**
  * The assigned comment the review cursor is on or nearest to, within the selected
- * file and hunk — the same rule `threadAtSelection` uses for commands. Undefined
- * when the hunk holds no assigned comment, or when two are equally near.
+ * file and hunk — the same rule `threadAtSelection` uses for commands, including
+ * a cursor on a note row. Undefined when the hunk holds no assigned comment, or
+ * when two are equally near.
  */
-export function commentAtCursor(filePath: string | undefined, hunkIndex: number | null, at: LineAddress | null | undefined): AssignedComment | undefined {
+export function commentAtCursor(filePath: string | undefined, hunkIndex: number | null, cursor: CursorPosition | LineAddress | null | undefined): AssignedComment | undefined {
   if (!filePath || hunkIndex === null) return undefined;
   const inHunk = allComments().filter(({ comment }) => comment.filePath === filePath && comment.hunkIndex === hunkIndex);
-  const nearest = nearestToLine(inHunk, ({ comment }) => commentAnchor(comment), at);
+  const position: CursorPosition | null = cursor && "at" in cursor ? cursor : { at: cursor ?? null };
+  const nearest = nearestToCursor(inHunk, ({ comment }) => commentAnchor(comment), position);
   return nearest.kind === "one" ? nearest.item.comment : undefined;
+}
+
+// --- Review cursor memory -------------------------------------------------------
+// Hunk's selection has no current line while the cursor sits on an inline note
+// row. The pane sees every rendered line, and built-in commands report which way
+// the cursor moved, so together they say which note row the cursor is on.
+
+let lastLine: { fileId: string; hunkIndex: number; at: LineAddress; seq: number } | undefined;
+let lastMove: { direction: 1 | -1; seq: number } | undefined;
+let cursorSeq = 0;
+
+const DOWNWARD = new Set(["hunk.review.stepDown", "hunk.review.nextNote", "hunk.review.pageDown", "hunk.review.halfPageDown", "hunk.review.jumpToBottom", "hunk.review.nextHunk", "hunk.review.nextAnnotatedHunk", "hunk.review.nextFile", "hunk.review.nextAnnotatedFile"]);
+const UPWARD = new Set(["hunk.review.stepUp", "hunk.review.previousNote", "hunk.review.pageUp", "hunk.review.halfPageUp", "hunk.review.jumpToTop", "hunk.review.previousHunk", "hunk.review.previousAnnotatedHunk", "hunk.review.previousFile", "hunk.review.previousAnnotatedFile"]);
+
+/** Remember the source line the cursor is on; called by the pane on every frame. */
+export function observeCurrentLine(fileId: string | null, hunkIndex: number | null, at: LineAddress | null | undefined): void {
+  if (fileId === null || hunkIndex === null || !at) return;
+  if (lastLine && lastLine.fileId === fileId && lastLine.hunkIndex === hunkIndex && lastLine.at.side === at.side && lastLine.at.line === at.line) return;
+  lastLine = { fileId, hunkIndex, at, seq: ++cursorSeq };
+}
+
+/** Remember which way a built-in review command moved the cursor. */
+export function observeCursorCommand(commandId: string): void {
+  const direction = DOWNWARD.has(commandId) ? 1 : UPWARD.has(commandId) ? -1 : undefined;
+  if (direction) lastMove = { direction, seq: ++cursorSeq };
+}
+
+/** Where the cursor is, for `nearestToCursor`; on a note row, what is known about how it got there. */
+export function cursorPosition(fileId: string | null, hunkIndex: number | null, at: LineAddress | null | undefined): CursorPosition {
+  if (at) return { at };
+  // A move recorded after the last rendered line is the one that left that line.
+  const moved = lastMove && (!lastLine || lastMove.seq > lastLine.seq) ? lastMove.direction : undefined;
+  const from = lastLine && lastLine.fileId === fileId && lastLine.hunkIndex === hunkIndex ? lastLine.at : undefined;
+  return { at: null, ...(from ? { from } : {}), ...(moved ? { direction: moved } : {}) };
+}
+
+export function resetCursorMemory(): void {
+  lastLine = undefined;
+  lastMove = undefined;
 }
 
 /** Records which comment the pane is showing as active; a no-op when unchanged. */
@@ -455,6 +496,7 @@ export function toggleThread(threadId: string): void {
 
 export function resetThreadBoard(): void {
   navigationByCommentId.clear();
+  resetCursorMemory();
   publish({ threads: [], navigating: false, helpVisible: false });
 }
 
@@ -492,8 +534,12 @@ export function activateSelectedThreadItem(): boolean {
 export function ThreadsPane({ files, theme, actions, width, selectedFileId, selectedHunkIndex, currentLine }: ExtensionPaneProps): ReactNode {
   const state = useThreadBoard();
   const cursorFile = selectedFileId === null ? undefined : files.find(file => file.id === selectedFileId)?.path;
-  const active = commentAtCursor(cursorFile, selectedHunkIndex, currentLine ? { side: currentLine.side, line: currentLine.line } : null);
+  const at = currentLine ? { side: currentLine.side, line: currentLine.line } : null;
+  const active = commentAtCursor(cursorFile, selectedHunkIndex, cursorPosition(selectedFileId, selectedHunkIndex, at));
+  useEffect(() => { observeCurrentLine(selectedFileId, selectedHunkIndex, at); }, [selectedFileId, selectedHunkIndex, at?.side, at?.line]);
   useEffect(() => { setCursorComment(active?.id); }, [active?.id]);
+  // A closed pane shows nothing, so it must not keep steering review-side keys.
+  useEffect(() => () => setCursorComment(undefined), []);
   const dispatching = state.threads.some(thread => thread.dispatching);
   const [throbberFrame, setThrobberFrame] = useState(0);
   useEffect(() => {
