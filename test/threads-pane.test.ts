@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { ExtensionReviewNote } from "hunkdiff/extension";
+import type { ExtensionDiffFile, ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
+import { recordCommand, recordFix, resetCursorTracking } from "../cursor.ts";
 import {
   assignComment,
   commentAtCursor,
   createThread,
-  cursorPosition,
-  observeCurrentLine,
-  observeCursorCommand,
+  paneCursor,
+  rememberSnapshot,
   createThreadFromComment,
   createThreadFromGroup,
   moveComment,
@@ -201,27 +201,39 @@ test("Threads navigation starts on the comment at the review cursor", () => {
   assert.equal(selectedThreadItem()?.kind, "thread");
 });
 
-test("the pane resolves a note row from the last rendered line and the move that left it", () => {
+test("the pane follows the cursor onto a note row by replaying Hunk's moves from the last exact position", () => {
   resetThreadBoard();
-  const created = createThread("Authentication", { ...note("one", "Check auth handling"), line: 10 });
-  assignComment(created.id, { ...note("two", "Add a regression test"), line: 11 });
-  const at = (line: number) => ({ side: "new" as const, line });
-  // Frames: line 10 rendered, then j, then the pane sees no current line.
-  observeCurrentLine("runtime:one", 0, at(10));
-  observeCursorCommand("hunk.review.stepDown");
-  assert.deepEqual(cursorPosition("runtime:one", 0, null), { at: null, from: at(10), direction: 1 });
-  assert.equal(commentAtCursor("src/one.ts", 0, cursorPosition("runtime:one", 0, null))?.id, "one");
-  // Frames: line 11 rendered, then k: the note row under line 10.
-  observeCurrentLine("runtime:one", 0, at(11));
-  observeCursorCommand("hunk.review.stepUp");
-  assert.equal(commentAtCursor("src/one.ts", 0, cursorPosition("runtime:one", 0, null))?.id, "one");
-  // A new line rendered after the move means the move did not lead onto a note row.
-  observeCurrentLine("runtime:one", 0, at(12));
-  assert.deepEqual(cursorPosition("runtime:one", 0, null), { at: null, from: at(12) });
-  // Another hunk's memory does not apply; the direction alone still does.
-  observeCursorCommand("hunk.review.nextNote");
-  assert.deepEqual(cursorPosition("runtime:one", 3, null), { at: null, direction: 1 });
-  // Unrelated commands are ignored, and a current line always wins.
-  observeCursorCommand("hunk.app.toggleHelp");
-  assert.deepEqual(cursorPosition("runtime:one", 0, at(12)), { at: at(12) });
+  resetCursorTracking();
+  const created = createThread("Authentication", { ...note("one", "Check auth handling"), side: "old", line: 10 });
+  assignComment(created.id, { ...note("two", "Add a regression test"), side: "old", line: 12 });
+  // A hunk that deletes old lines 10-12 and adds new line 10: rows -10, -11, -12, +10.
+  const file = { id: "runtime:one", path: "src/one.ts", patch: "@@ -10,3 +10,1 @@\n-a\n-b\n-c\n+d\n" } as unknown as ExtensionDiffFile;
+  const snapshot: ExtensionReviewSnapshot = {
+    generation: "g", stateRevision: 1,
+    files: [{ fileKey: "file:one", runtimeId: "runtime:one", path: "src/one.ts", changeKind: "change", stats: { additions: 1, deletions: 3, truncated: false }, flags: { untracked: false, binary: false, tooLarge: false, partial: false }, contentIdentity: "c" }],
+    notes: [
+      { id: "one", source: "user", fileKey: "file:one", summary: "a", editable: true, resolution: "active", anchor: { oldRange: [10, 10], preferred: { side: "old", line: 10 }, intersectingHunkIndices: [0], ownerHunkIndex: 0 } },
+      { id: "two", source: "user", fileKey: "file:one", summary: "b", editable: true, resolution: "active", anchor: { oldRange: [12, 12], preferred: { side: "old", line: 12 }, intersectingHunkIndices: [0], ownerHunkIndex: 0 } },
+    ],
+  };
+  rememberSnapshot(snapshot);
+  // Hunk paints a current line (split layout): that wins outright.
+  assert.deepEqual(paneCursor(file, 0, { side: "old", line: 11 }), { at: { side: "old", line: 11 } });
+  // Nothing known yet: no highlight rather than a guess.
+  assert.equal(commentAtCursor("src/one.ts", 0, paneCursor(file, 0, null)), undefined);
+  // The user saved "two": Hunk makes it active. Stepping up: row -12, row -11, then the note under -10.
+  recordFix({ kind: "note", noteId: "two" });
+  assert.equal(commentAtCursor("src/one.ts", 0, paneCursor(file, 0, null))?.id, "two");
+  recordCommand("hunk.review.stepUp");
+  assert.deepEqual(paneCursor(file, 0, null), { at: { side: "old", line: 12 } });
+  recordCommand("hunk.review.stepUp");
+  assert.deepEqual(paneCursor(file, 0, null), { at: { side: "old", line: 11 } });
+  recordCommand("hunk.review.stepUp");
+  assert.equal(commentAtCursor("src/one.ts", 0, paneCursor(file, 0, null))?.id, "one");
+  // Next note jumps straight to the other comment; a page move loses the position.
+  recordCommand("hunk.review.nextNote");
+  assert.equal(commentAtCursor("src/one.ts", 0, paneCursor(file, 0, null))?.id, "two");
+  recordCommand("hunk.review.pageDown");
+  assert.deepEqual(paneCursor(file, 0, null), { at: null });
+  resetCursorTracking();
 });

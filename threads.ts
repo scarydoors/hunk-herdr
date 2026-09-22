@@ -38,25 +38,36 @@ export function distanceToLine(anchor: LineAnchor, at: LineAddress): number {
 }
 
 /**
- * Where the review cursor is, including the case Hunk's selection cannot express:
- * a cursor on an inline note row reports no current line. Hunk renders a note row
- * directly below its anchor line, so the last source line and the direction of
- * the move that left it identify the note under the cursor.
+ * Where the review cursor is. Hunk's selection cannot express a cursor resting on
+ * an inline note row (it reports no current line), so `noteId` carries the root of
+ * the note under the cursor when the extension has worked that out; see cursor.ts.
  */
 export interface CursorPosition {
   /** The current source line, or null while the cursor is on a note row. */
   readonly at: LineAddress | null;
-  /** On a note row: the last source line the cursor was on in this file. */
-  readonly from?: LineAddress;
-  /** On a note row: which way the cursor moved to reach it, when known. */
-  readonly direction?: 1 | -1;
+  /** On a note row: the root comment of the thread whose row the cursor is on. */
+  readonly noteId?: string;
 }
 
-/** The line a note row is rendered under on the given side, if the anchor has one there. */
-function renderedLine(anchor: LineAnchor, side: "old" | "new"): number | undefined {
-  if (anchor.preferred?.side === side) return anchor.preferred.line;
-  const range = side === "old" ? anchor.oldRange : anchor.newRange;
-  return range?.[1];
+/**
+ * Maps a source address to its row in Hunk's render order, so distance between a
+ * deleted row and an added one is counted in rows, as the eye sees it, rather
+ * than in line numbers on incomparable sides. Undefined for a line no row shows.
+ */
+export type RowIndex = (at: LineAddress) => number | undefined;
+
+/** Builds a `RowIndex` from a file's rows in render order. */
+export function rowIndexOf(rows: readonly LineAddress[]): RowIndex {
+  const byKey = new Map(rows.map((row, index) => [`${row.side}:${row.line}`, index] as const));
+  return at => byKey.get(`${at.side}:${at.line}`);
+}
+
+/** The row a note is rendered under: its preferred line, else the end of its range on that side. */
+function renderedRow(anchor: LineAnchor): LineAddress | undefined {
+  if (anchor.preferred) return anchor.preferred;
+  if (anchor.newRange) return { side: "new", line: anchor.newRange[1] };
+  if (anchor.oldRange) return { side: "old", line: anchor.oldRange[1] };
+  return undefined;
 }
 
 export type Nearest<T> =
@@ -65,46 +76,35 @@ export type Nearest<T> =
   | { kind: "none" };
 
 /**
- * The one item under or nearest the cursor. On a source line that is the item
- * nearest by `distanceToLine`. On a note row it is the first item past the line
- * the cursor came from, in the direction it moved — the row Hunk placed there —
- * falling back to the nearest overall when nothing lies that way. Arriving on a
- * note row from another file, only the direction is known, so the first note in
- * the hunk along that direction is taken. Ties, and a note row with no history,
- * resolve to nothing. This is the single rule behind the Threads pane's active
- * comment and the thread a command acts on.
+ * The one item under or nearest the cursor. On a note row that is the item whose
+ * id the cursor names, exactly; on a source line it is the item nearest by
+ * `distanceToLine`. A note row the extension could not identify, and an exact
+ * tie, resolve to nothing. This is the single rule behind the Threads pane's
+ * active comment and the thread a command acts on.
  */
-export function nearestToCursor<T>(items: readonly T[], anchorOf: (item: T) => LineAnchor, cursor: CursorPosition | null | undefined): Nearest<T> {
-  if (!cursor || cursor.at) return nearestToLine(items, anchorOf, cursor?.at ?? null);
-  const { from, direction } = cursor;
-  if (from) {
-    const ahead = direction
-      ? items.filter(item => {
-        const line = renderedLine(anchorOf(item), from.side);
-        return line !== undefined && (direction > 0 ? line >= from.line : line < from.line);
-      })
-      : [];
-    return nearestToLine(ahead.length ? ahead : items, anchorOf, from);
+export function nearestToCursor<T>(items: readonly T[], anchorOf: (item: T) => LineAnchor, cursor: CursorPosition | null | undefined, idOf?: (item: T) => string, rows?: RowIndex): Nearest<T> {
+  if (cursor?.noteId !== undefined) {
+    const item = idOf ? items.find(candidate => idOf(candidate) === cursor.noteId) : undefined;
+    return item ? { kind: "one", item, distance: 0 } : { kind: "none" };
   }
-  if (direction) {
-    const side = "new";
-    const placed = items.map(item => ({ item, line: renderedLine(anchorOf(item), side) })).filter((entry): entry is { item: T; line: number } => entry.line !== undefined);
-    if (!placed.length) return nearestToLine(items, anchorOf, null);
-    const edge = placed.reduce((best, entry) => (direction > 0 ? entry.line < best.line : entry.line > best.line) ? entry : best);
-    return nearestToLine(placed.filter(entry => entry.line === edge.line).map(entry => entry.item), anchorOf, null);
-  }
-  return nearestToLine(items, anchorOf, null);
+  return nearestToLine(items, anchorOf, cursor?.at ?? null, rows);
 }
 
 /**
  * The one item nearest a line, by `distanceToLine`. Without a line every item is
  * equally near, so more than one is a tie.
  */
-export function nearestToLine<T>(items: readonly T[], anchorOf: (item: T) => LineAnchor, at: LineAddress | null | undefined): Nearest<T> {
+export function nearestToLine<T>(items: readonly T[], anchorOf: (item: T) => LineAnchor, at: LineAddress | null | undefined, rows?: RowIndex): Nearest<T> {
+  const cursorRow = at && rows ? rows(at) : undefined;
   let best: { item: T; distance: number } | undefined;
   let tied = 0;
   for (const item of items) {
-    const distance = at ? distanceToLine(anchorOf(item), at) : 0;
+    const anchor = anchorOf(item);
+    // Rows apart when both sit on rendered rows; otherwise lines apart on the cursor's side.
+    const anchorRow = cursorRow === undefined ? undefined : (() => { const row = renderedRow(anchor); return row && rows!(row); })();
+    const distance = !at ? 0 : cursorRow !== undefined && anchorRow !== undefined
+      ? (distanceToLine(anchor, at) === 0 ? 0 : Math.abs(anchorRow - cursorRow))
+      : distanceToLine(anchor, at);
     if (!best || distance < best.distance) { best = { item, distance }; tied = 1; }
     else if (distance === best.distance) tied++;
   }
@@ -148,10 +148,10 @@ function depth(note: ExtensionReviewSnapshotNote, byId: ReadonlyMap<string, Exte
  * line, so a hunk with several comments resolves to the closest one — the same
  * comment the Threads pane highlights. Agent and AI threads count only when the
  * hunk holds none of the user's. Only an exact tie between two threads is
- * refused. A cursor on a note row reports no current line, so `cursor` carries
- * where it came from and which way it moved; see `nearestToCursor`.
+ * refused. A cursor on a note row reports no current line, so `cursor` may name
+ * the note under it instead; see cursor.ts and `nearestToCursor`.
  */
-export function threadAtSelection(snapshot: ExtensionReviewSnapshot, selection: ExtensionReviewSelection, cursor: CursorPosition = { at: selection.currentLine }): ThreadMatch {
+export function threadAtSelection(snapshot: ExtensionReviewSnapshot, selection: ExtensionReviewSelection, cursor: CursorPosition = { at: selection.currentLine }, rows?: RowIndex): ThreadMatch {
   if (!selection.file || selection.hunkIndex === null) {
     return { kind: "none", message: "No review thread at the current location." };
   }
@@ -175,15 +175,17 @@ export function threadAtSelection(snapshot: ExtensionReviewSnapshot, selection: 
   // the cursor means; an agent's comment beside yours must not make it ambiguous.
   const roots = [...rootsInHunk.entries()];
   const own = roots.filter(([id]) => byId.get(id)?.source === "user");
-  const reference = cursor.at ?? cursor.from ?? null;
-  const nearest = nearestToCursor(own.length ? own : roots, ([, group]) => closestAnchor(group, reference), cursor);
+  // On a note row the cursor names the thread outright, whoever wrote it.
+  const nearest = cursor.noteId !== undefined
+    ? nearestToCursor(roots, ([, group]) => group[0]!.anchor, cursor, ([id]) => id)
+    : nearestToCursor(own.length ? own : roots, ([, group]) => closestAnchor(group, cursor.at, rows), cursor, undefined, rows);
   if (nearest.kind === "none") return { kind: "none", message: "No review thread at the current location." };
   if (nearest.kind === "tie") {
     return {
       kind: "ambiguous",
-      message: reference
+      message: cursor.at
         ? `${nearest.count} of your comments are equally close to this line; move onto one of them.`
-        : `${nearest.count} of your comments share this hunk; step onto one of them with j/k.`,
+        : `${nearest.count} of your comments share this hunk and Hunk did not say which is under the cursor; step onto it with ↑/↓ and try again.`,
     };
   }
   const [id] = nearest.item;
@@ -197,9 +199,9 @@ export function threadAtSelection(snapshot: ExtensionReviewSnapshot, selection: 
 }
 
 /** A thread is as near as its nearest note, so rank it by that note's anchor. */
-function closestAnchor(group: readonly ExtensionReviewSnapshotNote[], at: LineAddress | null): LineAnchor {
+function closestAnchor(group: readonly ExtensionReviewSnapshotNote[], at: LineAddress | null, rows?: RowIndex): LineAnchor {
   if (!at) return group[0]!.anchor;
-  const nearest = nearestToLine(group, note => note.anchor, at);
+  const nearest = nearestToLine(group, note => note.anchor, at, rows);
   return nearest.kind === "one" ? nearest.item.anchor : group[0]!.anchor;
 }
 

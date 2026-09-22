@@ -45,15 +45,26 @@ list their assigned comments; clicking a comment navigates to its source line.
 **P**, **A**, **Ctrl+R** and **X** act on the comment the sidebar shows as active, or
 on the keyboard-selected row while Threads navigation (**Ctrl+T**) is focused. That
 is a rule, not a coincidence: the highlight is read back rather than recomputed, so
-what you see is what a key touches. This includes a cursor resting on the comment's
-own row, where Hunk reports no current line: the extension remembers the last source
-line and which way `j`/`k` (or next/previous note) moved off it, and a note row always
-sits directly below its anchor line. With nothing highlighted, the same rule is applied
+what you see is what a key touches. With nothing highlighted, the same rule is applied
 to the review itself, which also covers a comment saved before this session (filed in
 Unassigned first) and an agent's comment when none of yours is in the hunk. A line
 with no comment shows a notice and does nothing. Use **Ctrl+T** to navigate the
 sidebar by keyboard: `j`/`k` (or arrows) moves, and Enter expands a thread or jumps to
 a selected comment.
+
+How the cursor is followed onto a comment's own row deserves a note, because Hunk
+does not say. While the cursor rests on an inline note row, Hunk's selection reports
+no current line and no note id, and in the unified layout it paints no current line
+for panes at all. The extension therefore rebuilds Hunk's list of cursor stops (every
+diff row, with each visible note's row directly under its anchor row) from the file's
+patch and the saved notes, and replays the moves Hunk reports as executed commands
+(Up/Down, next/previous note, hunk jumps) from the last position Hunk did state: the
+current line of your last command, or a comment you just saved, which Hunk makes
+active. Before acting on a replayed note row, the extension checks Hunk's own
+"a note is active" flag (its edit/reply commands being enabled) and the selected hunk.
+Page moves, jumps to the top or bottom, file changes and mouse clicks lose the
+position until the cursor is next on a source line; a Ctrl+R on such a row says so
+and asks you to step onto the comment with ↑/↓.
 
 **P** prompts the group's assigned agent, or opens the picker if it has none. The
 picker's first row starts the configured default agent (or the only configured kind),
@@ -85,9 +96,10 @@ and every reply, leaf-first,
 after one confirmation. In Threads navigation, **X** resolves the selected group's
 native threads when its heading is focused, or only the selected comment's native
 thread when a comment is focused. From the review, the comment the Threads pane
-highlights is used; agent and AI comments in the hunk count only when none of yours is
-there. Only an exact tie between two of your comments, or a note row the cursor
-reached in a way the extension did not observe, shows a notice and changes nothing.
+highlights is used: the one under the cursor on a note row, otherwise your own
+comment nearest the current line in rendered rows, with agent and AI comments
+counting only when none of yours is in the hunk. Only an exact tie, or a note row the
+extension could not follow the cursor onto, shows a notice and changes nothing.
 
 The picker lists agents from the calling pane's **live workspace**, across tabs,
 with their name/kind, state, pane ID and cwd. It excludes Hunk's own pane. Selecting

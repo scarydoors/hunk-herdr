@@ -15,6 +15,7 @@
     "threads.ts",
     "threads-pane.tsx",
     "model-defaults.ts",
+    "cursor.ts",
     "model-catalog.ts",
     "README.md"
   ],
