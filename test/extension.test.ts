@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import register from "../index.ts";
 import { Bridge, type Pane } from "../bridge.ts";
 import type { ExtensionCommandContext, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
-import { resetThreadBoard, threadBoardSnapshot } from "../threads-pane.tsx";
+import { createThread, resetThreadBoard, startThreadNavigation, threadBoardSnapshot } from "../threads-pane.tsx";
 
 const caller: Pane = { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", terminal_id: "caller" };
 const agent: Pane = { ...caller, pane_id: "w1:p2", terminal_id: "agent", agent: "pi", agent_status: "idle" };
@@ -81,6 +81,19 @@ test("registers discoverable commands and diagnostic CLI without requiring statu
   assert.match(h.options[1]![0]!, /^Authentication · 1 comment/);
 });
 
+test("native replies do not trigger thread assignment", async () => {
+  resetThreadBoard();
+  const h = host();
+  const reply: ExtensionReviewNote = {
+    id: "user:reply", parentId: "user:root", fileId: "runtime:one", filePath: "src/one.ts", hunkIndex: 0,
+    side: "new", line: 13, body: "Follow-up", draft: false,
+  };
+  await h.emit("note_created", { note: reply });
+  assert.deepEqual(threadBoardSnapshot().threads, []);
+  assert.equal(h.options.length, 0);
+  assert.deepEqual(h.openedPanes, []);
+});
+
 test("Unassigned groups explicitly unassigned comments", async () => {
   resetThreadBoard();
   const h = host();
@@ -135,6 +148,30 @@ test("cancelled picker never spawns or prompts", async t => {
   assert.equal(spawn.mock.callCount(), 0);
   assert.equal(prompt.mock.callCount(), 0);
   assert.equal(h.state.inputCalls, 0);
+});
+
+test("opens the prompt immediately while a new temporary agent is starting", async t => {
+  resetThreadBoard();
+  createThread("Authentication", {
+    id: "user:one", fileId: "runtime:one", filePath: "src/auth.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expiry", draft: false,
+  });
+  startThreadNavigation();
+  let finishSpawn!: (pane: Pane) => void;
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => []);
+  t.mock.method(Bridge.prototype, "layout", async () => ({ zoomed: true, focused_pane_id: caller.pane_id, area: { width: 100, height: 40 } }));
+  t.mock.method(Bridge.prototype, "spawn", () => new Promise<Pane>(resolve => { finishSpawn = resolve; }));
+  const h = host();
+  h.answers.push("+ Create temporary agent (hidden sibling)", "pi");
+  // Cancelling after the assertion avoids invoking the local hunk executable.
+  h.inputs.push(null);
+  const pending = h.invoke("prompt");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(h.state.inputCalls, 1);
+  await pending;
+  finishSpawn(agent);
+  await new Promise<void>(resolve => setImmediate(resolve));
 });
 
 test("cancelled agent kind does not mutate layout", async t => {

@@ -181,4 +181,20 @@ export class Bridge {
       throw new Error(`${error instanceof Error ? error.message : error}. Delivery may be uncertain; inspect the agent before retrying.`);
     }
   }
+  /** Queues delivery through Herdr, then waits for the submitted work to settle. */
+  async promptWhenReady(target: Pane, text: string): Promise<Pane> {
+    // A zero exec timeout preserves Herdr's indefinite wait instead of imposing
+    // this extension's polling cadence or an arbitrary queue deadline.
+    await this.api(["agent", "wait", target.pane_id], 0);
+    const agent = await this.validate(target);
+    if (!["idle", "done"].includes(agent.agent_status || "")) {
+      throw new Error(`Agent is ${agent.agent_status || "unknown"}; it did not become ready for the queued prompt.`);
+    }
+    try {
+      await this.api(["agent", "prompt", agent.pane_id, text, "--wait"], 0);
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : error}. Delivery or completion may be uncertain; inspect the agent before retrying.`);
+    }
+    return this.validate(target);
+  }
 }

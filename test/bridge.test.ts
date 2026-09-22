@@ -98,6 +98,15 @@ test("prompt is one argv value, not shell text; no completion wait", async () =>
   assert.deepEqual(f.calls.at(-1), ["agent", "prompt", agent.pane_id, text]);
 });
 
+test("queues a prompt with Herdr's agent wait command", async () => {
+  const f = fixture();
+  await f.bridge.promptWhenReady(agent, "Investigate the review");
+  assert.deepEqual(f.calls.filter(call => call[0] === "agent" && ["wait", "prompt"].includes(call[1]!)), [
+    ["agent", "wait", agent.pane_id],
+    ["agent", "prompt", agent.pane_id, "Investigate the review", "--wait"],
+  ]);
+});
+
 test("blocked, busy, unknown, moved, and replaced agents cannot receive prompts", async () => {
   for (const change of [
     { agent_status: "working" }, { agent_status: "blocked" }, { agent_status: "unknown" },

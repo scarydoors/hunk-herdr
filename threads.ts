@@ -81,6 +81,22 @@ type SessionList = {
 };
 
 /** Remove descendants before their parents so Hunk never leaves dangling replies. */
+/** Returns every active native thread that contains any requested comment ID. */
+export function threadsForCommentIds(snapshot: ExtensionReviewSnapshot, commentIds: ReadonlySet<string>): readonly ExtensionReviewSnapshotNote[] {
+  const active = snapshot.notes.filter(note => note.resolution === "active");
+  const byId = new Map(active.map(note => [note.id, note]));
+  const roots = new Set(active
+    .filter(note => commentIds.has(note.id))
+    .map(note => rootId(note, byId))
+    .filter((id): id is string => id !== null));
+  return active
+    .filter(note => {
+      const root = rootId(note, byId);
+      return root !== null && roots.has(root);
+    })
+    .sort((left, right) => depth(right, byId) - depth(left, byId));
+}
+
 export async function removeThread(run: Run, cwd: string, generation: string, notes: readonly ExtensionReviewSnapshotNote[]): Promise<void> {
   const listed = JSON.parse(await run("hunk", ["session", "list", "--json"], cwd)) as SessionList;
   const matches = (listed.sessions ?? []).filter(session => session.snapshot?.state?.reviewPublication?.generation === generation);
