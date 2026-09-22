@@ -5,7 +5,7 @@ import { Bridge, type Pane } from "../bridge.ts";
 import type { ExtensionKeyEvent, ExtensionCommandContext, ExtensionKeyboardMode, ExtensionReviewNote, ExtensionReviewSelection, ExtensionReviewSnapshot, ExtensionReviewSnapshotNote, HunkExtensionAPI } from "hunkdiff/extension";
 
 type KeyboardMode = { id: string; onKey: ExtensionKeyboardMode["onKey"]; onEnter?: () => void; onExit?: () => void };
-import { createThread, resetThreadBoard, threadBoardSnapshot } from "../threads-pane.tsx";
+import { createThread, resetThreadBoard, setCursorComment, threadBoardSnapshot } from "../threads-pane.tsx";
 import { DEFAULT_REQUEST } from "../index.ts";
 
 const caller: Pane = { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", terminal_id: "caller" };
@@ -190,6 +190,42 @@ test("P from the review cursor prompts the group of the comment under it", async
   h.inputs.push(null);
   await h.invoke("prompt");
   assert.match(h.inputTitles.at(-1)!, /· Authentication$/);
+});
+
+test("the comment the pane shows as active is the one a review-side key acts on", async () => {
+  resetThreadBoard();
+  const h = host();
+  createThread("Authentication", authNote);
+  createThread("Tests", { ...authNote, id: "user:two", line: 40, body: "Cover the failure path" });
+  // The snapshot lookup alone would pick the comment at line 12 for a cursor on line 13…
+  h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }, { id: "user:two", line: 40 }]);
+  h.state.selection = cursorAt(13);
+  // …but the pane is highlighting the other one, and the highlight is the rule.
+  setCursorComment("user:two");
+  h.answers.push("Unassigned");
+  await h.invoke("reassign-thread-group");
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.map(comment => comment.id)]), [
+    ["Authentication", ["user:one"]], ["Tests", []], ["Unassigned", ["user:two"]],
+  ]);
+  setCursorComment(undefined);
+});
+
+test("with no highlight, a cursor on a note row still resolves from how it got there", async () => {
+  resetThreadBoard();
+  const h = host();
+  h.state.snapshot = reviewAt([{ id: "user:a", line: 10 }, { id: "user:b", line: 11 }]);
+  // The pane saw line 11, then a step up left it for the note row under line 10.
+  await h.emit("command_executed", { commandId: "hunk.review.stepUp" });
+  h.state.selection = { ...cursorAt(11), currentLine: null };
+  const { observeCurrentLine } = await import("../threads-pane.tsx");
+  observeCurrentLine("runtime:one", 0, { side: "new", line: 11 });
+  await h.emit("command_executed", { commandId: "hunk.review.stepUp" });
+  h.answers.push("+ Create new thread…");
+  h.inputs.push("Authentication");
+  await h.invoke("reassign-thread-group");
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.map(comment => comment.id)]), [
+    ["Unassigned", []], ["Authentication", ["user:a"]],
+  ]);
 });
 
 test("Ctrl+L configures models without Threads focus", async () => {

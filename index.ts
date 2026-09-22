@@ -15,6 +15,8 @@ import {
   assignUnassignedThread,
   createThreadFromComment,
   createThreadFromGroup,
+  cursorPosition,
+  observeCursorCommand,
   moveComment,
   moveCommentToUnassigned,
   moveThreadComments,
@@ -120,9 +122,14 @@ export default function register(hunk: HunkExtensionAPI) {
   }
   /**
    * The Threads item a command acts on: the keyboard selection while Threads
-   * navigation is focused, otherwise the comment under the review cursor. A
-   * cursor comment that no group holds yet (one from before this session) is
-   * placed in Unassigned so it can be acted on at all.
+   * navigation is focused, otherwise the comment under the review cursor.
+   *
+   * Rule: the comment the Threads pane shows as active is the one a review-side
+   * key acts on. The pane's highlight is therefore read back here, not recomputed,
+   * so what you see is what P, A, Ctrl+R and X touch. The snapshot lookup below
+   * is the fallback for what the pane cannot show: a comment no group holds yet
+   * (one from before this session, filed in Unassigned here), an agent's comment
+   * when none of yours is in the hunk, or a pane that is closed.
    */
   function resolveThreadSelection(ctx: Context): ThreadSelection | undefined {
     if (ctx.keyboardModes.isActive("threads")) {
@@ -130,9 +137,14 @@ export default function register(hunk: HunkExtensionAPI) {
       if (!selection) ctx.notify("Select a Threads group or comment first (j/k).", "warning");
       return selection;
     }
+    const shown = threadBoardSnapshot().cursorCommentId;
+    const shownThread = threadForComment(shown);
+    const shownComment = shownThread?.comments.find(candidate => candidate.id === shown);
+    if (shownThread && shownComment) return { kind: "comment", thread: shownThread, comment: shownComment };
     const snapshot = ctx.review.snapshot();
     if (!snapshot) return undefined;
-    const match = threadAtSelection(snapshot, ctx.selection);
+    const cursor = cursorPosition(ctx.selection.file?.id ?? null, ctx.selection.hunkIndex, ctx.selection.currentLine);
+    const match = threadAtSelection(snapshot, ctx.selection, cursor);
     if (match.kind !== "found") {
       ctx.notify(match.kind === "none" ? "No review comment at the cursor. Save one, or focus Threads (Ctrl+T)." : match.message, "warning");
       return undefined;
@@ -373,7 +385,8 @@ export default function register(hunk: HunkExtensionAPI) {
         ? resolveSelectedThreadGroup(ctx, before, selected.thread)
         : resolveSelectedThreadComment(ctx, before, selected.thread, selected.comment.id);
     }
-    const match = threadAtSelection(before, ctx.selection);
+    const cursor = cursorPosition(ctx.selection.file?.id ?? null, ctx.selection.hunkIndex, ctx.selection.currentLine);
+    const match = threadAtSelection(before, ctx.selection, cursor);
     if (match.kind !== "found") {
       ctx.notify(match.message, match.kind === "ambiguous" ? "warning" : undefined);
       return;
@@ -594,6 +607,9 @@ export default function register(hunk: HunkExtensionAPI) {
       return { kind: "exit", code: 1 };
     }
   });
+  // Built-in cursor moves say which way the cursor left its last source line, which
+  // is what identifies a note row: Hunk's selection reports no line while on one.
+  hunk.on("command_executed", ({ commandId, canonicalCommandId }) => observeCursorCommand(canonicalCommandId ?? commandId));
   hunk.on("note_created", ({ note }, ctx) => assignUserComment(note, ctx));
   hunk.on("note_edited", ({ note }) => {
     if (!note.draft) updateAssignedComment(note);
