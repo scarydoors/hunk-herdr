@@ -14,6 +14,7 @@ Open Hunk in a Herdr pane, then:
 - **Ctrl+T** — focus Threads keyboard navigation (`j`/`k` or arrows, then Enter).
 - **Esc** — leave Threads navigation and return to the review; the sidebar stays open.
 - **Ctrl+L** — while Threads navigation is focused, choose a saved default model for Pi or Claude.
+- **?** — while Threads navigation is focused, show its keybindings.
 - **X** — resolve the review thread at the current line/hunk.
 - **Extensions → Herdr** commands also expose selection, status, reveal, hide,
   thread controls, and stopping the temporary agent. Menu grouping is named `hunk-herdr`.
@@ -182,6 +183,7 @@ No changes to your Nix-managed `config.toml` are needed. Optional key remapping:
 "hunk-herdr.prompt" = "P"
 "hunk-herdr.threads" = "T"
 "hunk-herdr.focus-threads" = "ctrl+t"
+"hunk-herdr.help" = "?"
 "hunk-herdr.models" = "ctrl+l"
 "hunk-herdr.resolve-thread" = "X"
 ```

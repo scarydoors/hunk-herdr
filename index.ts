@@ -72,6 +72,27 @@ export default function register(hunk: HunkExtensionAPI) {
   function client(ctx: Context): Bridge {
     return new Bridge(ctx.cwd);
   }
+  async function showThreadHelp(ctx: Context): Promise<void> {
+    if (!ctx.keyboardModes.isActive("threads")) {
+      ctx.notify("Focus Threads (Ctrl+T) to view Threads keybindings.", "warning");
+      return;
+    }
+    await ctx.dialogs.select({
+      title: "Threads keybindings",
+      options: [
+        "j / ↓  Next item",
+        "k / ↑  Previous item",
+        "Enter / Space  Expand group or jump to comment",
+        "P  Prompt selected group",
+        "A  Agent actions",
+        "Ctrl+L  Configure Pi/Claude model defaults",
+        "Ctrl+R  Move selected group or comment",
+        "X  Resolve focused group or comment",
+        "Esc  Leave Threads navigation",
+        "Close",
+      ],
+    });
+  }
   async function configureModels(ctx: Context): Promise<void> {
     if (!ctx.keyboardModes.isActive("threads")) {
       ctx.notify("Focus Threads (Ctrl+T) before configuring agent models.", "warning");
@@ -484,6 +505,7 @@ export default function register(hunk: HunkExtensionAPI) {
     if (!ctx.keyboardModes.isActive("threads")) ctx.keyboardModes.enterMode("threads");
   });
   command("pick", "Herdr: choose agent for selected Threads group…", async ctx => { await choose(ctx); });
+  command("help", "Herdr: show Threads keybindings", showThreadHelp, "?", false);
   command("models", "Herdr: configure Pi/Claude model defaults…", configureModels, "ctrl+l", false);
   command("prompt", "Herdr: prompt selected Threads group…", prompt, "P");
   command("status", "Herdr: check selected Threads group agent", refresh);
