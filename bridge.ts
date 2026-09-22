@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { AGENT_KINDS } from "./config.ts";
+import { setTimeout as delay } from "node:timers/promises";
 
 export type Run = (binary: string, args: string[], cwd: string, timeout?: number) => Promise<string>;
 export const run: Run = (binary, args, cwd, timeout = 15_000) => new Promise((resolve, reject) => {
@@ -61,10 +63,13 @@ export class Bridge {
   readonly cwd: string;
   readonly exec: Run;
   readonly env: NodeJS.ProcessEnv;
-  constructor(cwd: string, exec: Run = run, env: NodeJS.ProcessEnv = process.env) {
+  readonly settleResize: () => Promise<void>;
+  constructor(cwd: string, exec: Run = run, env: NodeJS.ProcessEnv = process.env,
+    settleResize: () => Promise<void> = () => delay(200)) {
     this.cwd = cwd;
     this.exec = exec;
     this.env = env;
+    this.settleResize = settleResize;
   }
 
   async api<T>(args: string[], timeout?: number): Promise<T> {
@@ -97,17 +102,23 @@ export class Bridge {
   }
   async spawn(kind: string): Promise<Pane> {
     if (this.owned) throw new Error("A temporary pane already exists. Stop it before creating another.");
-    if (!["pi", "claude", "codex", "gemini", "opencode"].includes(kind)) throw new Error("Unsupported agent kind");
+    if (!(AGENT_KINDS as readonly string[]).includes(kind)) throw new Error("Unsupported agent kind");
     const caller = await this.caller();
     const layout = await this.layout(caller);
-    // Zoom first so the split is never deliberately revealed. Do not steal focus.
-    await this.zoom(true);
+    // Splitting clears Herdr's zoom. Create the sibling first, then zoom Hunk
+    // once, rather than zooming immediately before Herdr undoes it.
     const { pane } = await this.api<{ pane: Pane }>([
       "pane", "split", caller.pane_id, "--direction", layout.area.width >= layout.area.height * 2.5 ? "right" : "down",
       "--cwd", this.cwd, "--no-focus",
     ]);
     const name = `hunk-${randomUUID().slice(0, 8)}`;
     this.owned = { pane, name }; // Track immediately, including blocked/failed startups.
+    // OpenTUI 0.5.6 debounces terminal resize by 100 ms and ignores a resize
+    // back to its cached dimensions. An immediate split -> zoom can therefore
+    // lose terminal cells without invalidating Hunk's render buffer. Let the
+    // smaller layout settle before restoring full size. This is a timing
+    // workaround, not a renderer acknowledgement; keep it injectable for tests.
+    await this.settleResize();
     await this.zoom(true);
     try {
       await this.api(["agent", "start", name, "--kind", kind, "--pane", pane.pane_id, "--timeout", "30000"], 35_000);

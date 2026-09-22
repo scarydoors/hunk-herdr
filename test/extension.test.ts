@@ -7,7 +7,7 @@ import type { ExtensionCommandContext, HunkExtensionAPI } from "hunkdiff/extensi
 const caller: Pane = { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", terminal_id: "caller" };
 const agent: Pane = { ...caller, pane_id: "w1:p2", terminal_id: "agent", agent: "pi", agent_status: "idle" };
 
-function host() {
+function host(config: Record<string, unknown> = {}) {
   const commands = new Map<string, (ctx: ExtensionCommandContext) => Promise<void> | void>();
   const answers: (string | null)[] = [];
   const notices: string[] = [];
@@ -22,7 +22,7 @@ function host() {
     },
   } as unknown as ExtensionCommandContext;
   register({
-    apiVersion: 10,
+    apiVersion: 10, config,
     registerCommand: (cmd: { id: string }, handler: (ctx: ExtensionCommandContext) => Promise<void> | void) => commands.set(cmd.id, handler),
     registerCliCommand: () => { state.cliRegistered = true; }, on: () => {}, log: () => {},
   } as unknown as HunkExtensionAPI);
@@ -56,6 +56,36 @@ test("cancelled agent kind does not mutate layout", async t => {
   const h = host();
   h.answers.push("+ Create temporary agent (hidden sibling)", "Leave unchanged");
   await h.invoke("pick");
+  assert.equal(spawn.mock.callCount(), 0);
+});
+
+test("configuration filters existing agents and prefers default without spawning on cancel", async t => {
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => [agent, { ...agent, pane_id: "w1:p3", agent: "codex" }]);
+  const spawn = t.mock.method(Bridge.prototype, "spawn", async () => agent);
+  const h = host({ agents: ["pi", "claude"], default_agent: "claude" });
+  h.answers.push("+ Create temporary agent (hidden sibling)", "Leave unchanged");
+  await h.invoke("pick");
+  assert.ok(h.options[0]!.some(value => value.includes("w1:p2")));
+  assert.ok(!h.options[0]!.some(value => value.includes("w1:p3")));
+  assert.deepEqual(h.options[1], ["claude", "pi", "Leave unchanged"]);
+  assert.equal(spawn.mock.callCount(), 0);
+});
+
+test("empty agents list offers only cancellation", async t => {
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => [agent]);
+  const h = host({ agents: [] });
+  await h.invoke("pick");
+  assert.deepEqual(h.options[0], ["Leave unchanged"]);
+});
+
+test("invalid config warns without spawning", async t => {
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  const spawn = t.mock.method(Bridge.prototype, "spawn", async () => agent);
+  const h = host({ agents: ["sh"] });
+  await h.invoke("pick");
+  assert.match(h.notices[0]!, /agents must be/);
   assert.equal(spawn.mock.callCount(), 0);
 });
 
