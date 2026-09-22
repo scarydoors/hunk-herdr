@@ -26,7 +26,24 @@ export interface ThreadBoardSnapshot {
   readonly threads: readonly ReviewThread[];
   readonly navigating: boolean;
   readonly selectedKey?: string;
+  /** True while the keybinding list is shown in place of the thread rows. */
+  readonly helpVisible?: boolean;
 }
+
+/** Shown by `?` while Threads navigation is focused. */
+const HELP_ROWS: readonly (readonly [string, string])[] = [
+  ["j / k", "move selection"],
+  ["↓ / ↑", "move selection"],
+  ["Enter", "expand group or jump to comment"],
+  ["A", "agent actions"],
+  ["P", "prompt selected group"],
+  ["X", "resolve focused group or comment"],
+  ["Ctrl+R", "move selected group or comment"],
+  ["Ctrl+L", "configure Pi/Claude model defaults"],
+  ["Ctrl+T", "focus Threads"],
+  ["T", "toggle the Threads sidebar"],
+  ["Esc", "leave Threads navigation"],
+];
 
 export type ThreadSelection =
   | { readonly kind: "thread"; readonly thread: ReviewThread }
@@ -353,7 +370,16 @@ export function startThreadNavigation(): boolean {
 }
 
 export function stopThreadNavigation(): void {
-  if (board.navigating || board.selectedKey) publish({ ...board, navigating: false, selectedKey: undefined });
+  if (board.navigating || board.selectedKey || board.helpVisible) {
+    publish({ ...board, navigating: false, selectedKey: undefined, helpVisible: false });
+  }
+}
+
+/** Show or hide the keybinding list; only meaningful while navigating. */
+export function toggleThreadHelp(): boolean {
+  if (!board.navigating) return false;
+  publish({ ...board, helpVisible: !board.helpVisible });
+  return true;
 }
 
 export function moveThreadSelection(delta: number): boolean {
@@ -376,7 +402,7 @@ export function toggleThread(threadId: string): void {
 
 export function resetThreadBoard(): void {
   navigationByCommentId.clear();
-  publish({ threads: [], navigating: false });
+  publish({ threads: [], navigating: false, helpVisible: false });
 }
 
 function oneLine(text: string, width: number): string {
@@ -438,16 +464,25 @@ export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps
     >
       <box style={{ width: "100%", flexDirection: "column", backgroundColor: theme.panel }}>
         <text
-          content={state.navigating ? " Threads · ? help" : " Threads · Ctrl+T to navigate"}
+          content={state.navigating
+            ? state.helpVisible ? " Threads · ? close help" : " Threads · ? help"
+            : " Threads · Ctrl+T to navigate"}
           style={{ fg: theme.accent, bg: theme.panel }}
         />
-        {state.threads.length === 0 ? (
+        {state.helpVisible ? HELP_ROWS.map(([chord, description]) => (
+          <text
+            key={chord}
+            content={` ${chord.padEnd(7)} ${oneLine(description, Math.max(6, width - 10))}`}
+            style={{ fg: theme.muted, bg: theme.panel }}
+          />
+        )) : null}
+        {!state.helpVisible && state.threads.length === 0 ? (
           <text
             content=" Save a user comment to create the first thread."
             style={{ fg: theme.muted, bg: theme.panel }}
           />
         ) : null}
-        {state.threads.flatMap(thread => [
+        {state.helpVisible ? [] : state.threads.flatMap(thread => [
           <text
             key={thread.id}
             content={` ${thread.expanded ? "▾" : "▸"} ${thread.dispatching ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[throbberFrame % 10] : thread.completed ? "✓" : " "} ${oneLine(thread.title, Math.max(8, width - 12))} (${thread.comments.length})`}

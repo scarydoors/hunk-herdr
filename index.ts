@@ -1,3 +1,4 @@
+import { matchesKey } from "hunkdiff/extension";
 import type { ExtensionCommandContext, ExtensionEventContext, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
 import { Bridge, buildPrompt, label, run, sameAgent, type Pane } from "./bridge.ts";
 import { agentConfig } from "./config.ts";
@@ -21,6 +22,7 @@ import {
   UNASSIGNED_THREAD_ID,
   UNASSIGNED_THREAD_TITLE,
   moveThreadSelection,
+  toggleThreadHelp,
   removeAssignedComment,
   removeThreadGroup,
   startThreadNavigation,
@@ -50,6 +52,8 @@ export default function register(hunk: HunkExtensionAPI) {
     onKey: key => {
       // Let the global visibility and focus commands keep their own bindings.
       if (key.name === "t") return "pass";
+      // Hunk owns "?" globally, so the mode has to claim it before the app help opens.
+      if (matchesKey("?", key)) return toggleThreadHelp() ? "handled" : "pass";
       if (key.name === "j" || key.name === "down") return moveThreadSelection(1) ? "handled" : "pass";
       if (key.name === "k" || key.name === "up") return moveThreadSelection(-1) ? "handled" : "pass";
       if (key.name === "enter" || key.name === "return" || key.name === "space") {
@@ -59,7 +63,9 @@ export default function register(hunk: HunkExtensionAPI) {
     },
   });
 
-  type ThreadAgent = { pane?: Pane; bridge: Bridge; owned: boolean; ready: Promise<Pane> };
+  // `model` is only known for agents Herdr started itself; an agent we attached to
+  // reports no model, so the prompt screen says so rather than guessing one.
+  type ThreadAgent = { pane?: Pane; bridge: Bridge; owned: boolean; ready: Promise<Pane>; model?: string };
   const threadAgents = new Map<string, ThreadAgent>();
   const dispatches = new Map<string, number>();
   const drafts = new Map<string, string>();
@@ -77,21 +83,7 @@ export default function register(hunk: HunkExtensionAPI) {
       ctx.notify("Focus Threads (Ctrl+T) to view Threads keybindings.", "warning");
       return;
     }
-    await ctx.dialogs.select({
-      title: "Threads keybindings",
-      options: [
-        "j / ↓  Next item",
-        "k / ↑  Previous item",
-        "Enter / Space  Expand group or jump to comment",
-        "P  Prompt selected group",
-        "A  Agent actions",
-        "Ctrl+L  Configure Pi/Claude model defaults",
-        "Ctrl+R  Move selected group or comment",
-        "X  Resolve focused group or comment",
-        "Esc  Leave Threads navigation",
-        "Close",
-      ],
-    });
+    toggleThreadHelp();
   }
   async function configureModels(ctx: Context): Promise<void> {
     if (!ctx.keyboardModes.isActive("threads")) {
@@ -151,6 +143,10 @@ export default function register(hunk: HunkExtensionAPI) {
     binding.pane = pane;
     return pane;
   }
+  function modelHint(binding: ThreadAgent): string {
+    if (!binding.owned) return "model: as started";
+    return binding.model ? `model: ${binding.model}` : "model: agent default";
+  }
   function agentLabel(agent: Pane): string {
     const binding = [...threadAgents.entries()].find(([, value]) => value.pane && sameAgent(value.pane, agent));
     const thread = binding && threadBoardSnapshot().threads.find(candidate => candidate.id === binding[0]);
@@ -193,10 +189,11 @@ export default function register(hunk: HunkExtensionAPI) {
       originallyZoomed ??= layout.zoomed;
       badge(ctx, `starting ${kind} for ${thread.title}…`);
       const endStarting = beginDispatch(thread.id);
-      const ready = api.spawn(kind, isConfigurableAgentKind(kind) ? modelDefaults[kind] : undefined).finally(endStarting);
+      const model = isConfigurableAgentKind(kind) ? modelDefaults[kind] : undefined;
+      const ready = api.spawn(kind, model).finally(endStarting);
       // Attach a handler now: the user may cancel the prompt before startup finishes.
       void ready.catch(() => {});
-      binding = { bridge: api, owned: true, ready };
+      binding = { bridge: api, owned: true, ready, model };
       threadAgents.set(thread.id, binding);
       if (waitForReady) {
         await readyAgent(binding);
@@ -216,7 +213,7 @@ export default function register(hunk: HunkExtensionAPI) {
     const binding = threadAgent(thread) ?? await choose(ctx, thread, false);
     if (!binding || !alive(ctx)) return;
     const text = await ctx.dialogs.input({
-      title: `Prompt ${binding.pane?.name || binding.pane?.agent || "starting agent"} · ${thread.title}`,
+      title: `Prompt ${binding.pane?.name || binding.pane?.agent || "starting agent"} · ${modelHint(binding)} · ${thread.title}`,
       placeholder: "Ask about this thread…", initial: drafts.get(thread.id) ?? "",
     });
     if (!text?.trim() || !alive(ctx)) return;
@@ -505,7 +502,8 @@ export default function register(hunk: HunkExtensionAPI) {
     if (!ctx.keyboardModes.isActive("threads")) ctx.keyboardModes.enterMode("threads");
   });
   command("pick", "Herdr: choose agent for selected Threads group…", async ctx => { await choose(ctx); });
-  command("help", "Herdr: show Threads keybindings", showThreadHelp, "?", false);
+  // No key here: Hunk's own "?" wins the binding, so the threads mode claims the key instead.
+  command("help", "Herdr: toggle Threads keybindings", showThreadHelp, undefined, false);
   command("models", "Herdr: configure Pi/Claude model defaults…", configureModels, "ctrl+l", false);
   command("prompt", "Herdr: prompt selected Threads group…", prompt, "P");
   command("status", "Herdr: check selected Threads group agent", refresh);

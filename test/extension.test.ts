@@ -2,7 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import register from "../index.ts";
 import { Bridge, type Pane } from "../bridge.ts";
-import type { ExtensionCommandContext, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
+import type { ExtensionKeyEvent, ExtensionCommandContext, ExtensionKeyboardMode, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
+
+type KeyboardMode = { id: string; onKey: ExtensionKeyboardMode["onKey"]; onEnter?: () => void; onExit?: () => void };
 import { createThread, resetThreadBoard, startThreadNavigation, threadBoardSnapshot } from "../threads-pane.tsx";
 
 const caller: Pane = { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", terminal_id: "caller" };
@@ -16,7 +18,8 @@ function host(config: Record<string, unknown> = {}) {
   const options: string[][] = [];
   const openedPanes: string[] = [];
   const openPanes = new Set<string>();
-  const keyboardModes = new Map<string, { onEnter?: () => void; onExit?: () => void }>();
+  const keyboardModes = new Map<string, KeyboardMode>();
+  const inputTitles: string[] = [];
   let activeKeyboardMode: string | undefined;
   const events = new Map<string, (payload: unknown, ctx: unknown) => void | Promise<void>>();
   const state = { live: true, inputCalls: 0, cliRegistered: false, paneRegistered: false, keyboardModeRegistered: false };
@@ -36,21 +39,23 @@ function host(config: Record<string, unknown> = {}) {
     },
     dialogs: {
       select: async (arg: { options: string[] }) => { options.push(arg.options); return answers.shift() ?? null; },
-      input: async () => { state.inputCalls++; return inputs.shift() ?? null; }, confirm: async () => false,
+      input: async (arg: { title: string }) => { state.inputCalls++; inputTitles.push(arg.title); return inputs.shift() ?? null; }, confirm: async () => false,
     },
   } as unknown as ExtensionCommandContext;
   register({
     apiVersion: 10, config,
     registerPane: () => { state.paneRegistered = true; },
-    registerKeyboardMode: (mode: { id: string; onEnter?: () => void; onExit?: () => void }) => { keyboardModes.set(mode.id, mode); state.keyboardModeRegistered = true; },
+    registerKeyboardMode: (mode: KeyboardMode) => { keyboardModes.set(mode.id, mode); state.keyboardModeRegistered = true; },
     registerCommand: (cmd: { id: string }, handler: (ctx: ExtensionCommandContext) => Promise<void> | void) => commands.set(cmd.id, handler),
     registerCliCommand: () => { state.cliRegistered = true; },
     on: (event: string, handler: (payload: unknown, ctx: unknown) => void | Promise<void>) => { events.set(event, handler); },
     log: () => {},
   } as unknown as HunkExtensionAPI);
   return {
-    commands, ctx, answers, inputs, notices, options, openedPanes, state,
+    commands, ctx, answers, inputs, inputTitles, notices, options, openedPanes, state,
     invoke: async (id: string) => commands.get(id)!(ctx),
+    press: (key: Partial<ExtensionKeyEvent>) =>
+      keyboardModes.get("threads")!.onKey({ name: "", sequence: "", ...key } as ExtensionKeyEvent, ctx as never),
     emit: async (event: string, payload: unknown) => events.get(event)?.(payload, ctx),
   };
 }
@@ -136,6 +141,21 @@ test("reassigns the selected Threads group through the pane command", async () =
   assert.match(h.notices.at(-1)!, /Moved 1 comment to thread: Tests/);
 });
 
+test("claims \"?\" for the Threads keybinding list instead of losing it to Hunk's own help", () => {
+  resetThreadBoard();
+  createThread("Authentication", {
+    id: "user:one", fileId: "runtime:one", filePath: "src/auth.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expiry", draft: false,
+  });
+  const h = host();
+  h.ctx.keyboardModes.enterMode("threads");
+  assert.equal(h.press({ sequence: "?", shift: true }), "handled");
+  assert.equal(threadBoardSnapshot().helpVisible, true);
+  assert.equal(h.press({ sequence: "?", shift: true }), "handled");
+  assert.equal(threadBoardSnapshot().helpVisible, false);
+  assert.equal(h.press({ name: "j" }), "handled", "navigation keys keep working");
+});
+
 test("cancelled picker never spawns or prompts", async t => {
   t.mock.method(Bridge.prototype, "caller", async () => caller);
   t.mock.method(Bridge.prototype, "agents", async () => [agent]);
@@ -148,6 +168,24 @@ test("cancelled picker never spawns or prompts", async t => {
   assert.equal(spawn.mock.callCount(), 0);
   assert.equal(prompt.mock.callCount(), 0);
   assert.equal(h.state.inputCalls, 0);
+});
+
+test("names the model on the prompt screen, and says so when the agent was not started here", async t => {
+  resetThreadBoard();
+  createThread("Authentication", {
+    id: "user:one", fileId: "runtime:one", filePath: "src/auth.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expiry", draft: false,
+  });
+  startThreadNavigation();
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => [agent]);
+  t.mock.method(Bridge.prototype, "validate", async () => agent);
+  const h = host();
+  h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
+  h.inputs.push(null); // Cancel before the prompt reaches the local hunk executable.
+  await h.invoke("prompt");
+  assert.equal(h.state.inputCalls, 1);
+  assert.match(h.inputTitles.at(-1)!, /^Prompt pi · model: as started · Authentication$/);
 });
 
 test("opens the prompt immediately while a new temporary agent is starting", async t => {

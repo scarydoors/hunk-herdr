@@ -20,6 +20,7 @@ import {
   threadBoardSnapshot,
   threadForComment,
   toggleThread,
+  toggleThreadHelp,
   updateAssignedComment,
 } from "../threads-pane.tsx";
 
@@ -54,6 +55,24 @@ test("navigates expanded thread rows and clears the selection on mode exit", () 
   stopThreadNavigation();
   assert.equal(selectedThreadItem(), undefined);
   assert.equal(threadBoardSnapshot().navigating, false);
+});
+
+test("toggles the keybinding list only while navigating, and drops it on exit", () => {
+  resetThreadBoard();
+  createThread("Authentication", note("one", "Check auth handling"));
+
+  assert.equal(toggleThreadHelp(), false, "the list stays closed outside Threads navigation");
+  assert.equal(threadBoardSnapshot().helpVisible ?? false, false);
+
+  startThreadNavigation();
+  assert.equal(toggleThreadHelp(), true);
+  assert.equal(threadBoardSnapshot().helpVisible, true);
+  assert.equal(toggleThreadHelp(), true);
+  assert.equal(threadBoardSnapshot().helpVisible, false);
+
+  toggleThreadHelp();
+  stopThreadNavigation();
+  assert.equal(threadBoardSnapshot().helpVisible, false);
 });
 
 test("moves a whole displayed group to an existing or new thread", () => {
