@@ -41,8 +41,9 @@ actions. The picker can select any eligible running agent in the current workspa
 started by this extension are labeled with their assigned group when shown in a
 later picker. A spinning indicator on a group means Herdr is starting its agent or
 sending it work; after Herdr observes its response, the indicator becomes a green
-checkmark. When creating an agent for **P**, the prompt field opens while it starts
-and delivery waits in the background. Each prompt includes an authoritative list of that group's comment
+checkmark. When creating an agent for **P**, the prompt field opens while it starts,
+and both delivery and the agent's turn are followed in the background, so every other
+command stays usable while a group is working. Each prompt includes an authoritative list of that group's comment
 IDs and explicitly prohibits acting on any other review comments. Press **Ctrl+R** on
 a thread heading to move the whole displayed group, or on a comment to move only
 that comment, into **Unassigned**, another thread, or a new named thread. With a
@@ -109,8 +110,12 @@ review using the Hunk skill. The extension doesn't restrict the agent's normal
 permissions: ask for read-only work if that's what you want.
 
 Only `idle`/`done` agents receive prompts. Identity and workspace are revalidated
-before submission. The notification means **submitted**, not completed; use
-**Check agent status** or reveal the agent for progress/results. Status-row text
+before submission. Sending notifies immediately; a second notification reports the
+agent's turn finishing, and the group's spinner runs in between. Herdr's waits are
+indefinite by design, so an agent that never reaches `idle`, `done`, or `blocked`
+leaves that spinner running — resolving the group or stopping its agent ends it, and
+neither is blocked by the wait. Use **Check agent status** or reveal the agent for
+progress/results. Status-row text
 (where supported) is last-known state, not a background poll. Failed submissions
 retain the draft; uncertain delivery is never automatically retried.
 
