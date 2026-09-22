@@ -73,6 +73,7 @@
 <span class="d">-shown = pane highlight ?? threadAtSelection(snapshot, ctx.selection, replayedCursor…)</span>
 <span class="a">+if !keyboardModes.isActive("threads"): notify "Focus Threads (Ctrl+T) …"; return
 +return selectedThreadItem()</span></pre>
+<div class="card"><h4>After the file changes</h4><p>Verified live: Hunk does not re-anchor a note when its file is edited. Inserting three lines above a comment on new line 12 left the note at new line 12, still reported <em>active</em>, now sitting on different content; a note whose hunk disappears stops rendering. The sidebar’s reveal therefore lands exactly where Hunk shows the note. Each Threads command, Ctrl+T first, reads <code>ctx.review.snapshot()</code> for current anchors and shows any verdict Hunk reports (● stale, ✗ gone). A watch reload cannot be read live: it emits no note event and event handlers have no snapshot, so those marks update on the next key.</p></div>
 <div class="card"><h4>Why not the review cursor</h4><p>Hunk’s selection reports no current line while the cursor rests on a note row, never names the active note, and in the unified layout paints no current line for panes at all. Following it meant rebuilding Hunk’s stop list and replaying reported commands; stepping across a fold into another hunk desynchronised it. The exact fix would be upstream (an <code>activeNoteId</code> on the extension selection). Until then the sidebar owns the selection and Hunk owns the reveal.</p></div>
 </div>
 

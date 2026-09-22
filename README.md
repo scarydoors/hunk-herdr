@@ -56,6 +56,15 @@ signal to extensions, and in the unified layout it paints no current line for pa
 so any review-side guess is an approximation. Revealing a line from the sidebar is
 exact.
 
+Editing a file under review does not move your comments. Hunk keeps each note at its
+saved line number, even when the edit shifted other content onto that line (an insert
+above a comment on new line 12 leaves the note at new line 12, reported active), and it
+stops rendering a note whose hunk is gone. The sidebar's reveal therefore always lands
+where Hunk itself shows the note. Whatever verdict Hunk does report is shown too
+(● stale, ✗ no longer rendered), refreshed from the review whenever you press Ctrl+T or
+run a Threads command. A watch reload emits no note event and cannot be read from an
+event handler, so those marks catch up on your next key rather than instantly.
+
 **P** prompts the group's assigned agent, or opens the picker if it has none. The
 picker's first row starts the configured default agent (or the only configured kind),
 naming its saved model; below it are the eligible running agents in the current
