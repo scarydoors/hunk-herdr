@@ -6,7 +6,7 @@ const caller: Pane = { pane_id: "w6:p1", workspace_id: "w6", tab_id: "w6:t1", te
 const agent: Pane = { ...caller, pane_id: "w6:p2", terminal_id: "agent", agent: "pi", agent_status: "idle", name: "reviewer" };
 const env = { HERDR_ENV: "1", HERDR_PANE_ID: "old-caller-id" };
 
-function fixture() {
+function fixture(settleResize?: () => Promise<void>) {
   const calls: string[][] = [];
   let agents = [agent];
   let pane = { ...agent };
@@ -28,7 +28,7 @@ function fixture() {
     return JSON.stringify({ result });
   };
   return {
-    bridge: new Bridge("/review with spaces", exec, env), calls,
+    bridge: new Bridge("/review with spaces", exec, env, settleResize ?? (async () => {})), calls,
     agents(value: Pane[]) { agents = value; }, pane(value: Pane) { pane = value; },
     failStart() { startFails = true; },
   };
@@ -49,16 +49,37 @@ test("outside Herdr fails before executing any CLI", async () => {
   assert.equal(calls, 0);
 });
 
-test("spawn zooms before split, preserves cwd/focus and registers owned pane", async () => {
+test("spawn splits before zooming once, preserves cwd/focus and registers owned pane", async () => {
   const f = fixture();
   const result = await f.bridge.spawn("pi");
   const split = f.calls.findIndex(a => a[1] === "split");
-  assert.ok(f.calls.findIndex(a => a[1] === "zoom") < split);
+  const zoom = f.calls.findIndex(a => a[1] === "zoom");
+  const start = f.calls.findIndex(a => a[0] === "agent" && a[1] === "start");
+  assert.ok(zoom > split);
+  assert.ok(start > zoom);
+  assert.deepEqual(f.calls.filter(a => a[1] === "zoom"), [["pane", "zoom", caller.pane_id, "--on"]]);
   assert.deepEqual(f.calls[split], ["pane", "split", caller.pane_id, "--direction", "right", "--cwd", "/review with spaces", "--no-focus"]);
   assert.equal(result.pane_id, agent.pane_id);
   assert.match(f.bridge.owned!.name, /^hunk-[a-f0-9]{8}$/);
   assert.equal(f.calls.some(a => a[1] === "focus"), false);
   await assert.rejects(f.bridge.spawn("pi"), /already exists/);
+});
+
+test("spawn waits for the split resize to settle before zooming or starting the agent", async () => {
+  let resume!: () => void;
+  let reached!: () => void;
+  const reachedBarrier = new Promise<void>(resolve => { reached = resolve; });
+  const barrier = new Promise<void>(resolve => { resume = resolve; });
+  const f = fixture(async () => { reached(); await barrier; });
+  const spawning = f.bridge.spawn("pi");
+  await reachedBarrier;
+  assert.ok(f.bridge.owned, "track the pane before waiting so cleanup can find it");
+  assert.ok(f.calls.some(a => a[1] === "split"));
+  assert.equal(f.calls.some(a => a[1] === "zoom" || a[1] === "start"), false);
+  resume();
+  await spawning;
+  assert.ok(f.calls.some(a => a[1] === "zoom"));
+  assert.ok(f.calls.some(a => a[1] === "start"));
 });
 
 test("startup failure retains owned pane for reveal/cleanup and never prompts", async () => {

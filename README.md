@@ -2,7 +2,7 @@
 
 A dependency-free Hunk extension for choosing a workspace-local agent and sending
 it a request from the review UI. No Nix configuration or Herdr plugin installation
-is required: this is a **Hunk** extension, stored alongside your Herdr configuration.
+is required: this is a **Hunk** extension, with an editable checkout in `~/work/hunk-herdr`.
 
 ## Use
 
@@ -21,9 +21,12 @@ The selection lasts for this Hunk process, not across restarts.
 Temporary agents support Pi, Claude, Codex, Gemini and OpenCode (the chosen CLI
 must already be installed and authenticated). Creation:
 
-1. Zooms Hunk's Herdr pane.
-2. Splits a sibling right/down based on available geometry, preserving the review
+1. Splits a sibling right/down based on available geometry, preserving the review
    cwd and passing `--no-focus`.
+2. Waits 200 ms for Hunk's debounced resize handling, then zooms Hunk's Herdr
+   pane. Without this pause, a fast split/zoom can leave stale cells because
+   OpenTUI skips resizing when the dimensions return to their cached value.
+   This is a timing workaround, not a guaranteed repaint acknowledgement.
 3. Starts a uniquely named `hunk-…` agent and waits for Herdr's startup readiness.
 
 This is a normal interactive agent hidden by zoom, **not a headless process**.
@@ -60,12 +63,36 @@ before submission. The notification means **submitted**, not completed; use
 (where supported) is last-known state, not a background poll. Failed submissions
 retain the draft; uncertain delivery is never automatically retried.
 
+## Configuration
+
+Use Hunk's native config in `~/.config/hunk/config.toml` (or its XDG location):
+
+```toml
+[extension.hunk-herdr]
+agents = ["claude", "pi"]
+default_agent = "claude"
+```
+
+`agents` controls both the existing-agent picker and temporary agent types.
+Supported values: `pi`, `claude`, `codex`, `gemini`, `opencode`. Omitted means
+all five; an empty list disables agent choices. Duplicates are removed.
+`default_agent` must be in `agents`; it is shown first (initially highlighted)
+in the temporary-agent picker and named in its title. You must still confirm;
+nothing is automatically launched or selected from existing panes.
+Without a default, the configured list order is used.
+
+Repository `.hunk/config.toml` overrides user settings key by key. Values are
+validated against the fixed supported types; arbitrary commands are not allowed.
+Invalid configuration reports a warning when opening the picker rather than
+silently enabling other agents. Restart Hunk after changing configuration.
+For Nix-managed configuration, set these values in the Nix source instead.
+
 ## Local installation
 
 Current source directory:
 
 ```text
-~/.config/herdr/hunk-extensions/hunk-herdr/
+~/work/hunk-herdr/
 ```
 
 Hunk auto-loads it through a two-line forwarding entry:
@@ -80,8 +107,8 @@ this Hunk build does not discover symlinked extension directories.
 Restart existing Hunk windows to load changes. To test explicitly without installing:
 
 ```sh
-hunk --extension ~/.config/herdr/hunk-extensions/hunk-herdr herdr-check
-hunk diff --extension ~/.config/herdr/hunk-extensions/hunk-herdr
+hunk --extension ~/work/hunk-herdr herdr-check
+hunk diff --extension ~/work/hunk-herdr
 ```
 
 `herdr-check` is a noninteractive, read-only diagnostic: it verifies extension
@@ -116,7 +143,7 @@ Before publishing, choose a license, tag a release and add the `hunk-extension`
 GitHub topic. Hunk's npm 0.22.0 declarations lag its bundled API-28 skill docs, so
 status-row support is feature-detected; the required base API is 10.
 
-Tests cover workspace isolation, identity checks, zoom/split ordering, startup
+Tests cover workspace isolation, identity checks, split/zoom ordering, startup
 failure recovery, cancellation, stale reviews, concurrent actions, prompt
 construction and owned-pane cleanup. Actual TUI interaction and real agent
 startup should be smoke-tested manually in a disposable workspace.

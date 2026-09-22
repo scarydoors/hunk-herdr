@@ -1,5 +1,6 @@
 import type { ExtensionCommandContext, HunkExtensionAPI } from "hunkdiff/extension";
 import { Bridge, buildPrompt, label, run, type Pane } from "./bridge.ts";
+import { agentConfig } from "./config.ts";
 
 // 0.22.0's published declarations predate the latest skill docs (API 26).
 // Feature-detect the new status row; keep native dialogs working on API 10+.
@@ -27,19 +28,24 @@ export default function register(hunk: HunkExtensionAPI) {
   }
   async function choose(ctx: Context): Promise<void> {
     const api = client(ctx);
-    const agents = await api.agents();
+    const config = agentConfig(hunk.config);
+    const agents = (await api.agents()).filter(a => config.agents.some(kind => kind === a.agent));
     if (!alive(ctx)) return;
     const create = "+ Create temporary agent (hidden sibling)";
     const options = agents.map(a => `${target && a.pane_id === target.pane_id ? "● " : "○ "}${label(a)}`);
     const picked = await ctx.dialogs.select({
       title: "Herdr · agents in this workspace",
-      options: [...options, create, "Leave unchanged"],
+      options: [...options, ...(config.agents.length ? [create] : []), "Leave unchanged"],
     });
     if (!picked || picked === "Leave unchanged" || !alive(ctx)) return;
     if (picked === create) {
       if (api.owned) throw new Error("A temporary pane already exists. Use Reveal temporary pane or Stop temporary agent first.");
-      const kind = await ctx.dialogs.select({ title: "Temporary agent · choose kind", options: ["pi", "claude", "codex", "gemini", "opencode", "Leave unchanged"] });
+      const kind = await ctx.dialogs.select({
+        title: `Temporary agent · choose kind${config.defaultAgent ? ` (default: ${config.defaultAgent})` : ""}`,
+        options: [...config.agents, "Leave unchanged"],
+      });
       if (!kind || kind === "Leave unchanged" || !alive(ctx)) return;
+      if (!config.agents.some(allowed => allowed === kind)) throw new Error("Agent type is not enabled.");
       const caller = await api.caller();
       const layout = await api.layout(caller);
       if (!alive(ctx)) return;
