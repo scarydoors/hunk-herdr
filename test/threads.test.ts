@@ -43,10 +43,31 @@ test("finds one whole thread at the current line and orders children before pare
   if (match.kind === "found") assert.deepEqual(match.notes.map(item => item.id), ["nested", "reply", "root"]);
 });
 
-test("refuses an ambiguous location without selecting a thread", () => {
-  const match = threadAtSelection(snapshot([note("one"), note("two")]), selection());
-  assert.equal(match.kind, "ambiguous");
-  if (match.kind === "ambiguous") assert.match(match.message, /2 review threads/);
+test("picks the thread nearest the cursor line when the hunk holds several", () => {
+  const notes = [note("near", { line: 14 }), note("far", { line: 30 }), note("reply", { parentId: "far", line: 31 })];
+  const match = threadAtSelection(snapshot(notes), selection(12));
+  assert.equal(match.kind, "found");
+  if (match.kind === "found") assert.equal(match.root.id, "near");
+
+  const below = threadAtSelection(snapshot(notes), selection(26));
+  if (below.kind === "found") assert.deepEqual(below.notes.map(item => item.id), ["reply", "far"]);
+  else assert.fail("expected the lower thread");
+});
+
+test("a note whose range contains the line wins over a closer edge", () => {
+  const spanning: ExtensionReviewSnapshotNote = { ...note("span"), anchor: { ...note("span").anchor, newRange: [10, 20] } };
+  const match = threadAtSelection(snapshot([spanning, note("edge", { line: 21 })]), selection(20));
+  assert.equal(match.kind === "found" && match.root.id, "span");
+});
+
+test("refuses only an exact tie, naming how to break it", () => {
+  const tie = threadAtSelection(snapshot([note("one", { line: 10 }), note("two", { line: 14 })]), selection(12));
+  assert.equal(tie.kind, "ambiguous");
+  if (tie.kind === "ambiguous") assert.match(tie.message, /2 review threads are equally close/);
+
+  const noLine = threadAtSelection(snapshot([note("one"), note("two")]), selection(null));
+  assert.equal(noLine.kind, "ambiguous");
+  if (noLine.kind === "ambiguous") assert.match(noLine.message, /share this hunk/);
 });
 
 test("falls back to the selected hunk when no exact line matches", () => {
