@@ -143,5 +143,8 @@ test("payload includes skill discovery, full user text, cwd and selection", () =
   assert.ok(payload.includes("/nix/store/skill.md"));
   assert.ok(payload.includes('"/review"'));
   assert.ok(payload.includes("hunk 3"));
+  assert.ok(payload.includes("IMPORTANT: Read the review's user-authored comments"));
+  assert.ok(payload.includes("--reply-to <note-id>"));
+  assert.ok(payload.includes("do not answer with detached root comments"));
   assert.ok(payload.endsWith(text));
 });

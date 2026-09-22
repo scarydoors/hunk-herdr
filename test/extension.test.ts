@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import register from "../index.ts";
 import { Bridge, type Pane } from "../bridge.ts";
-import type { ExtensionCommandContext, HunkExtensionAPI } from "hunkdiff/extension";
+import type { ExtensionCommandContext, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
+import { resetThreadBoard, threadBoardSnapshot } from "../threads-pane.tsx";
 
 const caller: Pane = { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", terminal_id: "caller" };
 const agent: Pane = { ...caller, pane_id: "w1:p2", terminal_id: "agent", agent: "pi", agent_status: "idle" };
@@ -10,29 +11,56 @@ const agent: Pane = { ...caller, pane_id: "w1:p2", terminal_id: "agent", agent: 
 function host(config: Record<string, unknown> = {}) {
   const commands = new Map<string, (ctx: ExtensionCommandContext) => Promise<void> | void>();
   const answers: (string | null)[] = [];
+  const inputs: (string | null)[] = [];
   const notices: string[] = [];
   const options: string[][] = [];
-  const state = { live: true, inputCalls: 0, cliRegistered: false };
+  const openedPanes: string[] = [];
+  const events = new Map<string, (payload: unknown, ctx: unknown) => void | Promise<void>>();
+  const state = { live: true, inputCalls: 0, cliRegistered: false, paneRegistered: false };
   const ctx = {
     cwd: "/review", review: { snapshot: () => state.live ? {} : null },
     selection: { file: null, hunkIndex: null }, notify: (text: string) => notices.push(text),
+    panes: { open: (id: string) => openedPanes.push(id), toggle: () => {} },
     dialogs: {
       select: async (arg: { options: string[] }) => { options.push(arg.options); return answers.shift() ?? null; },
-      input: async () => { state.inputCalls++; return null; }, confirm: async () => false,
+      input: async () => { state.inputCalls++; return inputs.shift() ?? null; }, confirm: async () => false,
     },
   } as unknown as ExtensionCommandContext;
   register({
     apiVersion: 10, config,
+    registerPane: () => { state.paneRegistered = true; },
     registerCommand: (cmd: { id: string }, handler: (ctx: ExtensionCommandContext) => Promise<void> | void) => commands.set(cmd.id, handler),
-    registerCliCommand: () => { state.cliRegistered = true; }, on: () => {}, log: () => {},
+    registerCliCommand: () => { state.cliRegistered = true; },
+    on: (event: string, handler: (payload: unknown, ctx: unknown) => void | Promise<void>) => { events.set(event, handler); },
+    log: () => {},
   } as unknown as HunkExtensionAPI);
-  return { commands, ctx, answers, notices, options, state, invoke: async (id: string) => commands.get(id)!(ctx) };
+  return {
+    commands, ctx, answers, inputs, notices, options, openedPanes, state,
+    invoke: async (id: string) => commands.get(id)!(ctx),
+    emit: async (event: string, payload: unknown) => events.get(event)?.(payload, ctx),
+  };
 }
 
 test("registers discoverable commands and diagnostic CLI without requiring status-row API", () => {
   const h = host();
-  assert.deepEqual([...h.commands.keys()], ["menu", "pick", "prompt", "status", "reveal", "reveal-temporary", "hide", "stop"]);
+  assert.deepEqual([...h.commands.keys()], ["menu", "threads", "pick", "prompt", "status", "reveal", "reveal-temporary", "hide", "stop", "resolve-thread"]);
   assert.equal(h.state.cliRegistered, true);
+  assert.equal(h.state.paneRegistered, true);
+});
+
+ test("saved user comments can create a thread and open the sidebar", async () => {
+  resetThreadBoard();
+  const h = host();
+  const note: ExtensionReviewNote = {
+    id: "user:one", fileId: "runtime:one", filePath: "src/one.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expired credentials", draft: false,
+  };
+  h.answers.push("+ Create new thread…");
+  h.inputs.push("Authentication");
+  await h.emit("note_created", { note });
+  assert.equal(threadBoardSnapshot().threads[0]?.title, "Authentication");
+  assert.deepEqual(h.openedPanes, ["threads"]);
+  assert.match(h.notices.at(-1)!, /Assigned comment/);
 });
 
 test("cancelled picker never spawns or prompts", async t => {
