@@ -3,15 +3,18 @@ import assert from "node:assert/strict";
 import type { ExtensionReviewNote } from "hunkdiff/extension";
 import {
   assignComment,
+  commentAtCursor,
   createThread,
   createThreadFromComment,
   createThreadFromGroup,
   moveComment,
   moveThreadComments,
   moveThreadSelection,
+  nearestThreadForNote,
   removeAssignedComment,
   resetThreadBoard,
   selectedThreadItem,
+  setCursorComment,
   setThreadCompleted,
   setThreadDispatching,
   startThreadNavigation,
@@ -22,6 +25,7 @@ import {
   toggleThread,
   toggleThreadHelp,
   updateAssignedComment,
+  updateThreadCommentNavigation,
 } from "../threads-pane.tsx";
 
 function note(id: string, body: string, parentId?: string): ExtensionReviewNote {
@@ -133,4 +137,49 @@ test("suggests a bounded title from the first comment line", () => {
   const title = suggestedThreadTitle(note("one", `${"a".repeat(70)}\nignored`));
   assert.equal(title.length, 48);
   assert.ok(title.endsWith("…"));
+});
+
+test("finds the group with the closest comment in the same file, using live anchors", () => {
+  resetThreadBoard();
+  const auth = createThread("Authentication", { ...note("one", "Check auth handling"), line: 10 });
+  const tests = createThread("Tests", { ...note("two", "Cover failures"), line: 100 });
+  assert.equal(nearestThreadForNote({ id: "new", filePath: "src/one.ts", line: 30 })?.id, auth.id);
+  assert.equal(nearestThreadForNote({ id: "new", filePath: "src/one.ts", line: 80 })?.id, tests.id);
+  assert.equal(nearestThreadForNote({ id: "new", filePath: "src/other.ts", line: 10 }), undefined);
+  // Hunk moved the first comment down; the lookup follows it.
+  updateThreadCommentNavigation("one", { side: "new", line: 79 });
+  assert.equal(nearestThreadForNote({ id: "new", filePath: "src/one.ts", line: 80 })?.id, auth.id);
+});
+
+test("the comment at the cursor is the closest one in the selected file and hunk", () => {
+  resetThreadBoard();
+  const created = createThread("Authentication", { ...note("one", "Check auth handling"), line: 10 });
+  assignComment(created.id, { ...note("two", "Add a regression test"), line: 40 });
+  assignComment(created.id, { ...note("three", "Other hunk"), hunkIndex: 1, line: 200 });
+  assert.equal(commentAtCursor("src/one.ts", 0, 35)?.id, "two");
+  assert.equal(commentAtCursor("src/one.ts", 0, 12)?.id, "one");
+  assert.equal(commentAtCursor("src/one.ts", 1, undefined)?.id, "three");
+  assert.equal(commentAtCursor("src/one.ts", 2, 200), undefined);
+  assert.equal(commentAtCursor(undefined, 0, 10), undefined);
+});
+
+test("Threads navigation starts on the comment at the review cursor", () => {
+  resetThreadBoard();
+  const created = createThread("Authentication", note("one", "Check auth handling"));
+  assignComment(created.id, note("two", "Add a regression test"));
+  setCursorComment("two");
+  startThreadNavigation();
+  const selected = selectedThreadItem();
+  assert.equal(selected?.kind === "comment" ? selected.comment.id : undefined, "two");
+  stopThreadNavigation();
+
+  // A collapsed group still lands on its heading.
+  toggleThread(created.id);
+  startThreadNavigation();
+  assert.deepEqual(selectedThreadItem()?.kind, "thread");
+  stopThreadNavigation();
+
+  setCursorComment(undefined);
+  startThreadNavigation();
+  assert.equal(selectedThreadItem()?.kind, "thread");
 });

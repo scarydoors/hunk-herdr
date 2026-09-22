@@ -28,6 +28,8 @@ export interface ThreadBoardSnapshot {
   readonly selectedKey?: string;
   /** True while the keybinding list is shown in place of the thread rows. */
   readonly helpVisible?: boolean;
+  /** The assigned comment nearest the review cursor, as the pane last saw it. */
+  readonly cursorCommentId?: string;
 }
 
 /** Shown by `?` while Threads navigation is focused. */
@@ -35,10 +37,10 @@ const HELP_ROWS: readonly (readonly [string, string])[] = [
   ["j / k", "move selection"],
   ["↓ / ↑", "move selection"],
   ["Enter", "expand group or jump to comment"],
-  ["A", "agent actions"],
-  ["P", "prompt selected group"],
-  ["X", "resolve focused group or comment"],
-  ["Ctrl+R", "move selected group or comment"],
+  ["A", "agent actions for the group"],
+  ["P", "prompt the group"],
+  ["X", "resolve the group or comment"],
+  ["Ctrl+R", "move or name the group or comment"],
   ["Ctrl+L", "configure Pi/Claude model defaults"],
   ["Ctrl+T", "focus Threads"],
   ["T", "toggle the Threads sidebar"],
@@ -96,6 +98,50 @@ export function updateThreadCommentNavigation(commentId: string, preferred: { si
 export function threadForComment(commentId: string | undefined): ReviewThread | undefined {
   if (!commentId) return undefined;
   return board.threads.find(thread => thread.comments.some(comment => comment.id === commentId));
+}
+
+/** The line a comment currently sits on: the live anchor when Hunk has reported one. */
+function commentLine(comment: AssignedComment): number {
+  return navigationByCommentId.get(comment.id)?.line ?? comment.line;
+}
+
+/**
+ * The group holding the comment closest to `note` in the same file, or undefined
+ * when no group has a comment in that file. Ties keep the earlier group.
+ */
+export function nearestThreadForNote(note: Pick<ExtensionReviewNote, "id" | "filePath" | "line">): ReviewThread | undefined {
+  let best: { thread: ReviewThread; distance: number } | undefined;
+  for (const thread of board.threads) {
+    for (const comment of thread.comments) {
+      if (comment.filePath !== note.filePath || comment.id === note.id) continue;
+      const distance = Math.abs(commentLine(comment) - note.line);
+      if (!best || distance < best.distance) best = { thread, distance };
+    }
+  }
+  return best?.thread;
+}
+
+/**
+ * The assigned comment the review cursor is on or nearest to, within the selected
+ * file and hunk. Undefined when that hunk holds no assigned comment.
+ */
+export function commentAtCursor(filePath: string | undefined, hunkIndex: number | null, line: number | undefined): AssignedComment | undefined {
+  if (!filePath || hunkIndex === null) return undefined;
+  let best: { comment: AssignedComment; distance: number } | undefined;
+  for (const thread of board.threads) {
+    for (const comment of thread.comments) {
+      if (comment.filePath !== filePath || comment.hunkIndex !== hunkIndex) continue;
+      const distance = line === undefined ? 0 : Math.abs(commentLine(comment) - line);
+      if (!best || distance < best.distance) best = { comment, distance };
+    }
+  }
+  return best?.comment;
+}
+
+/** Records which comment the pane is showing as active; a no-op when unchanged. */
+export function setCursorComment(commentId: string | undefined): void {
+  if (board.cursorCommentId === commentId) return;
+  publish({ ...board, cursorCommentId: commentId });
 }
 
 export function suggestedThreadTitle(note: Pick<ExtensionReviewNote, "body" | "filePath">): string {
@@ -363,9 +409,15 @@ export function selectedThreadItem(): ThreadSelection | undefined {
 }
 
 export function startThreadNavigation(): boolean {
-  const first = selections()[0];
+  const items = selections();
+  const first = items[0];
   if (!first) return false;
-  publish({ ...board, navigating: true, selectedKey: board.selectedKey ?? selectionKey(first) });
+  // Land on the comment the review cursor is at, so Ctrl+T continues where the user was reading.
+  const atCursor = board.cursorCommentId
+    ? items.find(item => item.kind === "comment" && item.comment.id === board.cursorCommentId)
+      ?? items.find(item => item.kind === "thread" && item.thread.comments.some(comment => comment.id === board.cursorCommentId))
+    : undefined;
+  publish({ ...board, navigating: true, selectedKey: board.selectedKey ?? selectionKey(atCursor ?? first) });
   return true;
 }
 
@@ -436,8 +488,11 @@ export function activateSelectedThreadItem(): boolean {
 }
 
 /** Session-local prototype UI for grouping saved user comments into orchestration threads. */
-export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps): ReactNode {
+export function ThreadsPane({ files, theme, actions, width, selectedFileId, selectedHunkIndex, currentLine }: ExtensionPaneProps): ReactNode {
   const state = useThreadBoard();
+  const cursorFile = selectedFileId === null ? undefined : files.find(file => file.id === selectedFileId)?.path;
+  const active = commentAtCursor(cursorFile, selectedHunkIndex, currentLine?.line);
+  useEffect(() => { setCursorComment(active?.id); }, [active?.id]);
   const dispatching = state.threads.some(thread => thread.dispatching);
   const [throbberFrame, setThrobberFrame] = useState(0);
   useEffect(() => {
@@ -482,22 +537,32 @@ export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps
             style={{ fg: theme.muted, bg: theme.panel }}
           />
         ) : null}
-        {state.helpVisible ? [] : state.threads.flatMap(thread => [
-          <text
-            key={thread.id}
-            content={` ${thread.expanded ? "▾" : "▸"} ${thread.dispatching ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[throbberFrame % 10] : thread.completed ? "✓" : " "} ${oneLine(thread.title, Math.max(8, width - 12))} (${thread.comments.length})`}
-            style={{ fg: thread.completed && !thread.dispatching ? theme.badgeAdded : theme.text, bg: state.selectedKey === `thread:${thread.id}` ? theme.panelAlt : theme.panel }}
-            onMouseDown={() => toggleThread(thread.id)}
-          />,
-          ...(thread.expanded ? thread.comments.map(comment => (
+        {state.helpVisible ? [] : state.threads.flatMap(thread => {
+          // A collapsed group still shows that the cursor's comment is inside it.
+          const holdsCursor = !thread.expanded && thread.comments.some(comment => comment.id === active?.id);
+          return [
             <text
-              key={`${thread.id}:${comment.id}`}
-              content={`   └ ${oneLine(comment.body, Math.max(8, width - 7))}`}
-              style={{ fg: theme.muted, bg: state.selectedKey === `comment:${thread.id}:${comment.id}` ? theme.panelAlt : theme.panel }}
-              onMouseDown={() => revealComment(comment, files, actions)}
-            />
-          )) : []),
-        ])}
+              key={thread.id}
+              content={` ${thread.expanded ? "▾" : "▸"} ${thread.dispatching ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[throbberFrame % 10] : thread.completed ? "✓" : " "} ${oneLine(thread.title, Math.max(8, width - 12))} (${thread.comments.length})`}
+              style={{
+                fg: thread.completed && !thread.dispatching ? theme.badgeAdded : holdsCursor ? theme.accent : theme.text,
+                bg: state.selectedKey === `thread:${thread.id}` ? theme.panelAlt : theme.panel,
+              }}
+              onMouseDown={() => toggleThread(thread.id)}
+            />,
+            ...(thread.expanded ? thread.comments.map(comment => {
+              const isActive = comment.id === active?.id;
+              return (
+                <text
+                  key={`${thread.id}:${comment.id}`}
+                  content={`   ${isActive ? "›" : "└"} ${oneLine(comment.body, Math.max(8, width - 7))}`}
+                  style={{ fg: isActive ? theme.accent : theme.muted, bg: state.selectedKey === `comment:${thread.id}:${comment.id}` ? theme.panelAlt : theme.panel }}
+                  onMouseDown={() => revealComment(comment, files, actions)}
+                />
+              );
+            }) : []),
+          ];
+        })}
       </box>
     </scrollbox>
   );
