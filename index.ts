@@ -1,8 +1,8 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { matchesKey } from "hunkdiff/extension";
-import type { ExtensionCommandContext, ExtensionEventContext, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
+import type { ExtensionCommandContext, ExtensionEventContext, ExtensionReviewNote, ExtensionReviewSelection, ExtensionReviewSnapshot, ExtensionReviewSnapshotNote, HunkExtensionAPI } from "hunkdiff/extension";
 import { Bridge, buildPrompt, label, run, sameAgent, type Pane } from "./bridge.ts";
-import { agentConfig } from "./config.ts";
+import { agentConfig, type AgentKind } from "./config.ts";
 import { modelOptions } from "./model-catalog.ts";
 import { isConfigurableAgentKind, loadModelDefaults, saveModelDefaults, type ConfigurableAgentKind, type ModelDefaults } from "./model-defaults.ts";
 import { removeThread, threadAtSelection, threadsForCommentIds } from "./threads.ts";
@@ -10,15 +10,16 @@ import {
   ThreadsPane,
   activateSelectedThreadItem,
   type ReviewThread,
+  type ThreadSelection,
   assignComment,
   assignUnassignedThread,
-  createThread,
   createThreadFromComment,
   createThreadFromGroup,
   moveComment,
   moveCommentToUnassigned,
   moveThreadComments,
   moveThreadToUnassigned,
+  nearestThreadForNote,
   selectedThreadItem,
   threadForComment,
   UNASSIGNED_THREAD_ID,
@@ -38,12 +39,17 @@ import {
 
 type Context = ExtensionCommandContext;
 
+/** What an empty prompt sends: the group's comments are the request. */
+export const DEFAULT_REQUEST = "Address every listed review comment and reply in its thread.";
+
 export default function register(hunk: HunkExtensionAPI) {
   hunk.registerPane({
     id: "threads",
     title: "Threads",
     placement: "right",
     width: { preferred: 42, min: 28, max: 72, fraction: 0.3 },
+    // The pane highlights the comment at the review cursor, so it needs the current line.
+    currentLine: true,
     component: ThreadsPane,
   });
   hunk.registerKeyboardMode({
@@ -71,7 +77,6 @@ export default function register(hunk: HunkExtensionAPI) {
   const threadAgents = new Map<string, ThreadAgent>();
   const dispatches = new Map<string, number>();
   const drafts = new Map<string, string>();
-  let preferredThreadId = UNASSIGNED_THREAD_ID;
   let disposed = false;
   let pending: Promise<void> | undefined;
   let originallyZoomed: boolean | undefined;
@@ -88,10 +93,6 @@ export default function register(hunk: HunkExtensionAPI) {
     toggleThreadHelp();
   }
   async function configureModels(ctx: Context): Promise<void> {
-    if (!ctx.keyboardModes.isActive("threads")) {
-      ctx.notify("Focus Threads (Ctrl+T) before configuring agent models.", "warning");
-      return;
-    }
     const config = agentConfig(hunk.config);
     const kinds = (["pi", "claude"] as const).filter(kind => config.agents.includes(kind));
     if (!kinds.length) {
@@ -117,10 +118,53 @@ export default function register(hunk: HunkExtensionAPI) {
     modelDefaults = next;
     ctx.notify(model.model ? `Default ${agent.kind} model saved: ${model.model}` : `Default ${agent.kind} model cleared.`);
   }
+  /**
+   * The Threads item a command acts on: the keyboard selection while Threads
+   * navigation is focused, otherwise the comment under the review cursor. A
+   * cursor comment that no group holds yet (one from before this session) is
+   * placed in Unassigned so it can be acted on at all.
+   */
+  function resolveThreadSelection(ctx: Context): ThreadSelection | undefined {
+    if (ctx.keyboardModes.isActive("threads")) {
+      const selection = selectedThreadItem();
+      if (!selection) ctx.notify("Select a Threads group or comment first (j/k).", "warning");
+      return selection;
+    }
+    const snapshot = ctx.review.snapshot();
+    if (!snapshot) return undefined;
+    const match = threadAtSelection(snapshot, ctx.selection);
+    if (match.kind !== "found") {
+      ctx.notify(match.kind === "none" ? "No review comment at the cursor. Save one, or focus Threads (Ctrl+T)." : match.message, "warning");
+      return undefined;
+    }
+    let thread = threadForComment(match.root.id);
+    if (!thread) {
+      if (match.root.source !== "user") {
+        ctx.notify("The comment at the cursor was not written by you, so it has no Threads group.", "warning");
+        return undefined;
+      }
+      thread = assignUnassignedThread(noteFromSnapshot(snapshot, match.root, ctx.selection));
+    }
+    const comment = thread.comments.find(candidate => candidate.id === match.root.id);
+    return comment ? { kind: "comment", thread, comment } : { kind: "thread", thread };
+  }
   function selectedGroup(ctx: Context): ReviewThread | undefined {
-    const selection = selectedThreadItem();
-    if (!selection) ctx.notify("Focus a Threads group or comment first (Ctrl+T).", "warning");
-    return selection?.thread;
+    return resolveThreadSelection(ctx)?.thread;
+  }
+  /** Rebuilds the lifecycle-event shape of a note from the authoritative snapshot. */
+  function noteFromSnapshot(snapshot: ExtensionReviewSnapshot, root: ExtensionReviewSnapshotNote, selection: ExtensionReviewSelection): ExtensionReviewNote {
+    const file = snapshot.files.find(candidate => candidate.fileKey === root.fileKey);
+    const preferred = root.anchor.preferred ?? selection.currentLine ?? undefined;
+    return {
+      id: root.id,
+      fileId: file?.runtimeId ?? selection.file?.id ?? "",
+      filePath: file?.path ?? selection.file?.path ?? "",
+      hunkIndex: root.anchor.ownerHunkIndex ?? root.anchor.intersectingHunkIndices[0] ?? selection.hunkIndex ?? 0,
+      side: preferred?.side ?? "new",
+      line: preferred?.line ?? root.anchor.newRange?.[0] ?? root.anchor.oldRange?.[0] ?? 1,
+      body: root.summary,
+      draft: false,
+    };
   }
   function threadAgent(thread: ReviewThread): ThreadAgent | undefined {
     return threadAgents.get(thread.id);
@@ -170,21 +214,31 @@ export default function register(hunk: HunkExtensionAPI) {
     const agents = (await api.agents()).filter(agent => config.agents.some(kind => kind === agent.agent)
       && (!(agent.foreground_cwd || agent.cwd) || (agent.foreground_cwd || agent.cwd) === ctx.cwd));
     if (!alive(ctx)) return undefined;
-    const create = "+ Create temporary agent (hidden sibling)";
+    // The default kind (or the only kind) starts from the first row, so Enter is
+    // enough; existing idle agents and other kinds stay one row away.
+    const direct = config.defaultAgent ?? (config.agents.length === 1 ? config.agents[0] : undefined);
+    const directModel = direct && isConfigurableAgentKind(direct) ? modelDefaults[direct] : undefined;
+    const startDirect = direct ? `+ Start ${direct}${config.defaultAgent ? " (default)" : ""}${directModel ? ` · ${directModel}` : ""}` : undefined;
+    const otherKinds = config.agents.filter(kind => kind !== direct);
+    const startOther = otherKinds.length ? (direct ? "+ Start another kind…" : "+ Start temporary agent…") : undefined;
     const options = agents.map(agent => `${threadAgent(thread)?.pane?.pane_id === agent.pane_id ? "● " : "○ "}${agentLabel(agent)}`);
     const picked = await ctx.dialogs.select({
       title: `Herdr · agent for ${thread.title}`,
-      options: [...options, ...(config.agents.length ? [create] : []), "Leave unchanged"],
+      options: [...(startDirect ? [startDirect] : []), ...options, ...(startOther ? [startOther] : []), "Leave unchanged"],
     });
     if (!picked || picked === "Leave unchanged" || !alive(ctx)) return undefined;
     let binding: ThreadAgent;
-    if (picked === create) {
-      const kind = await ctx.dialogs.select({
-        title: `Temporary agent for ${thread.title} · choose kind${config.defaultAgent ? ` (default: ${config.defaultAgent})` : ""}`,
-        options: [...config.agents, "Leave unchanged"],
-      });
-      if (!kind || kind === "Leave unchanged" || !alive(ctx)) return undefined;
-      if (!config.agents.some(allowed => allowed === kind)) throw new Error("Agent type is not enabled.");
+    if (picked === startDirect || picked === startOther) {
+      let kind: AgentKind | undefined = picked === startDirect ? direct : undefined;
+      if (!kind) {
+        const chosen = await ctx.dialogs.select({
+          title: `Temporary agent for ${thread.title} · choose kind`,
+          options: [...otherKinds, "Leave unchanged"],
+        });
+        if (!chosen || chosen === "Leave unchanged" || !alive(ctx)) return undefined;
+        kind = otherKinds.find(allowed => allowed === chosen);
+        if (!kind) throw new Error("Agent type is not enabled.");
+      }
       const caller = await api.caller();
       const layout = await api.layout(caller);
       if (!alive(ctx)) return;
@@ -214,16 +268,20 @@ export default function register(hunk: HunkExtensionAPI) {
     if (!thread) return;
     const binding = threadAgent(thread) ?? await choose(ctx, thread, false);
     if (!binding || !alive(ctx)) return;
+    const count = thread.comments.length;
     const text = await ctx.dialogs.input({
       title: `Prompt ${agentName(binding)} · ${modelHint(binding)} · ${thread.title}`,
-      placeholder: "Ask about this thread…", initial: drafts.get(thread.id) ?? "",
+      placeholder: `Enter to address the ${count} listed comment${count === 1 ? "" : "s"}, or type extra instructions…`,
+      initial: drafts.get(thread.id) ?? "",
     });
-    if (!text?.trim() || !alive(ctx)) return;
-    drafts.set(thread.id, text);
+    // Esc cancels; an empty submission means the listed comments are the request.
+    if (text === null || text === undefined || !alive(ctx)) return;
+    const typed = text.trim() ? text : undefined;
+    if (typed) drafts.set(thread.id, typed);
     const skill = await binding.bridge.skillPath();
     if (!skill) throw new Error("hunk skill path returned no path. Nothing sent.");
     if (!alive(ctx)) return;
-    const payload = buildPrompt(skill, ctx.cwd, text, {
+    const payload = buildPrompt(skill, ctx.cwd, typed ?? DEFAULT_REQUEST, {
       file: ctx.selection.file?.path,
       hunk: ctx.selection.hunkIndex ?? undefined,
       thread: { title: thread.title, comments: thread.comments },
@@ -234,22 +292,25 @@ export default function register(hunk: HunkExtensionAPI) {
     // therefore hold the single-operation lock for the rest of the session, so the
     // turn is watched here instead: the group's own spinner reports it, and every
     // other command — resolving, stopping this agent — stays usable meanwhile.
-    watchDispatch(ctx, thread, binding, payload);
+    watchDispatch(ctx, thread, binding, payload, typed);
     ctx.notify(`Sent to ${agentName(binding)}: ${thread.title}.`);
   }
   function agentName(binding: ThreadAgent): string {
     return binding.pane?.name || binding.pane?.agent || "starting agent";
   }
   /** Follows one dispatched prompt to completion outside the command that sent it. */
-  function watchDispatch(ctx: Context, thread: ReviewThread, binding: ThreadAgent, payload: string): void {
+  function watchDispatch(ctx: Context, thread: ReviewThread, binding: ThreadAgent, payload: string, draft?: string): void {
     const endSending = beginDispatch(thread.id);
+    // The text is on its way: a second P during the turn starts from an empty prompt.
+    drafts.delete(thread.id);
     void (async () => {
       try {
         const settled = await binding.bridge.promptWhenReady(await readyAgent(binding), payload);
         if (["idle", "done"].includes(settled.agent_status || "")) setThreadCompleted(thread.id);
-        drafts.delete(thread.id);
         if (alive(ctx)) ctx.notify(`Agent completed the prompt for thread: ${thread.title}.`);
       } catch (error) {
+        // A failed hand-off keeps the typed request available for the retry.
+        if (draft && !drafts.has(thread.id)) drafts.set(thread.id, draft);
         if (alive(ctx)) ctx.notify(`${thread.title}: ${error instanceof Error ? error.message : String(error)}`, "warning");
       } finally {
         endSending();
@@ -385,65 +446,25 @@ export default function register(hunk: HunkExtensionAPI) {
     removeThreadGroup(thread.id);
     if (alive(ctx)) ctx.notify(`Resolved Threads group ${thread.title} (${notes.length} comment${notes.length === 1 ? "" : "s"}).`);
   }
-  async function assignUserComment(note: ExtensionReviewNote, ctx: ExtensionEventContext): Promise<void> {
+  /**
+   * A saved root comment joins the group holding the closest comment in the same
+   * file; a file with no assigned comment yet lands in Unassigned. No dialog:
+   * naming or moving is the exception, done afterwards with Ctrl+R.
+   */
+  function assignUserComment(note: ExtensionReviewNote, ctx: ExtensionEventContext): void {
     // Native replies belong to their root's review conversation; only roots can
     // represent an independently assignable orchestration request.
     if (note.draft || note.parentId) return;
-    const threads = threadBoardSnapshot().threads;
-    const entries = threads
-      .filter(thread => thread.id !== UNASSIGNED_THREAD_ID)
-      .map((thread, index) => ({
-        thread,
-        label: `${thread.title} · ${thread.comments.length} comment${thread.comments.length === 1 ? "" : "s"} [${index + 1}]`,
-      }));
-    const create = "+ Create new thread…";
-    const unassigned = UNASSIGNED_THREAD_TITLE;
-    const options = [
-      { id: UNASSIGNED_THREAD_ID, label: unassigned },
-      ...entries.map(entry => ({ id: entry.thread.id, label: entry.label })),
-      { id: create, label: create },
-    ].sort((left, right) => Number(right.id === preferredThreadId) - Number(left.id === preferredThreadId));
-    const picked = await ctx.dialogs.select({
-      title: "Assign saved comment to a thread",
-      // Hunk selects the first option initially; keep the last chosen thread there.
-      options: options.map(option => option.label),
-    });
-    let assignedTitle: string;
-    if (!picked || picked === unassigned) {
-      const thread = assignUnassignedThread(note);
-      if (picked) preferredThreadId = thread.id;
-      assignedTitle = thread.title;
-    } else if (picked === create) {
-      const title = await ctx.dialogs.input({
-        title: "New thread title",
-        placeholder: "What unit of work does this comment belong to?",
-      });
-      if (!title?.trim()) {
-        assignedTitle = assignUnassignedThread(note).title;
-      } else {
-        const thread = createThread(title, note);
-        // "Create" is a one-off action; next time select the thread it created.
-        preferredThreadId = thread.id;
-        assignedTitle = thread.title;
-      }
-    } else {
-      const entry = entries.find(candidate => candidate.label === picked);
-      if (!entry || !assignComment(entry.thread.id, note)) {
-        ctx.notify("That thread is no longer available; the comment was not assigned.", "warning");
-        return;
-      }
-      preferredThreadId = entry.thread.id;
-      assignedTitle = entry.thread.title;
-    }
+    const nearest = nearestThreadForNote(note);
+    const thread = nearest && assignComment(nearest.id, note)
+      ? threadBoardSnapshot().threads.find(candidate => candidate.id === nearest.id)!
+      : assignUnassignedThread(note);
     ctx.panes.open("threads");
-    ctx.notify(`Assigned comment to thread: ${assignedTitle}`);
+    ctx.notify(`Added to ${thread.title} · Ctrl+R to move or name`);
   }
   async function reassignSelectedGroup(ctx: Context): Promise<void> {
-    const selection = selectedThreadItem();
-    if (!selection) {
-      ctx.notify("Focus a Threads group or comment first (Ctrl+T).", "warning");
-      return;
-    }
+    const selection = resolveThreadSelection(ctx);
+    if (!selection) return;
     const source = selection.thread;
     const comment = selection.kind === "comment" ? selection.comment : undefined;
     if (threadAgents.has(source.id)) {
@@ -481,7 +502,6 @@ export default function register(hunk: HunkExtensionAPI) {
       ctx.notify("That thread is no longer available; the group was not moved.", "warning");
       return;
     }
-    preferredThreadId = destination.id;
     ctx.panes.open("threads");
     ctx.notify(`Moved ${comment ? "comment" : `${source.comments.length} comment${source.comments.length === 1 ? "" : "s"}`} to thread: ${destination.title}`);
   }
@@ -550,18 +570,18 @@ export default function register(hunk: HunkExtensionAPI) {
     }
     if (!ctx.keyboardModes.isActive("threads")) ctx.keyboardModes.enterMode("threads");
   });
-  command("pick", "Herdr: choose agent for selected Threads group…", async ctx => { await choose(ctx); });
+  command("pick", "Herdr: choose agent for the Threads group…", async ctx => { await choose(ctx); });
   // No key here: Hunk's own "?" wins the binding, so the threads mode claims the key instead.
   command("help", "Herdr: toggle Threads keybindings", showThreadHelp, { needsHerdr: false });
   command("models", "Herdr: configure Pi/Claude model defaults…", configureModels, { key: "ctrl+l", needsHerdr: false });
-  command("prompt", "Herdr: prompt selected Threads group…", prompt, { key: "P" });
-  command("status", "Herdr: check selected Threads group agent", refresh);
-  command("reveal", "Herdr: reveal selected Threads group agent", reveal);
+  command("prompt", "Herdr: prompt the Threads group…", prompt, { key: "P" });
+  command("status", "Herdr: check the Threads group agent", refresh);
+  command("reveal", "Herdr: reveal the Threads group agent", reveal);
   command("hide", "Herdr: hide siblings / zoom Hunk", ctx => client(ctx).zoom(true));
-  command("stop", "Herdr: stop selected Threads group agent…", stop);
+  command("stop", "Herdr: stop the Threads group agent…", stop);
   // Resolving is about review state, not agent work, so it runs while an agent is busy.
   command("resolve-thread", "Herdr: resolve review thread", resolveThread, { key: "X", needsHerdr: false, whilePending: true });
-  command("reassign-thread-group", "Herdr: move selected Threads item…", reassignSelectedGroup, { key: "ctrl+r", needsHerdr: false });
+  command("reassign-thread-group", "Herdr: move or name the Threads item…", reassignSelectedGroup, { key: "ctrl+r", needsHerdr: false });
   hunk.registerCliCommand({ name: "herdr-check", summary: "Check Hunk/Herdr integration without opening the TUI" }, async (_args, ctx) => {
     try {
       const api = new Bridge(ctx.cwd);

@@ -8,12 +8,19 @@ is required: this is a **Hunk** extension, with an editable checkout in `~/work/
 
 Open Hunk in a Herdr pane, then:
 
-- **A** — actions for the currently selected Threads group: choose, prompt, inspect, reveal, or stop its agent.
-- **P** — prompt the currently selected Threads group (opens its agent picker if none is assigned).
+The happy path is **save a comment → P → Enter → Enter**: the comment joins a
+group on its own, P acts on the comment under the review cursor, the first picker
+row starts the default agent, and an empty prompt tells it to address the group's
+comments.
+
+- **A** — actions for the Threads group: choose, prompt, inspect, reveal, or stop its agent.
+- **P** — prompt the Threads group (opens its agent picker if none is assigned).
+- **Ctrl+R** — move the group or comment to another thread, or name a new one.
 - **T** — show or hide the session-local Threads sidebar.
-- **Ctrl+T** — focus Threads keyboard navigation (`j`/`k` or arrows, then Enter).
+- **Ctrl+T** — focus Threads keyboard navigation (`j`/`k` or arrows, then Enter). It
+  starts on the comment nearest the review cursor.
 - **Esc** — leave Threads navigation and return to the review; the sidebar stays open.
-- **Ctrl+L** — while Threads navigation is focused, choose a saved default model for Pi or Claude.
+- **Ctrl+L** — choose a saved default model for Pi or Claude.
 - **?** — while Threads navigation is focused, toggle its keybinding list in the pane.
 - **X** — resolve the review thread at the current line/hunk. Resolving works while an
   agent is still running; once a group's last comment is resolved the group is retired,
@@ -23,23 +30,34 @@ Open Hunk in a Herdr pane, then:
 
 ## Threads interface experiment
 
-After a user saves a review comment, the extension asks whether to assign it to
-an existing thread, create a new named thread, or assign it to the session-wide
-**Unassigned** group. Escaping or cancelling the selector also places the comment
-in Unassigned. Only root review comments are assignable; native replies remain in
-their root conversation. The selector starts on the thread chosen last; after
-creating a thread, that newly created thread becomes the next default.
-Creating or choosing a thread opens the right-hand Threads sidebar.
+When a user saves a root review comment, it joins the Threads group that already
+holds the closest comment in the same file; a file with no assigned comment yet
+puts it in the session-wide **Unassigned** group. No dialog is shown: a toast names
+the group, and **Ctrl+R** moves the comment elsewhere or into a new named thread.
+Native replies remain in their root conversation and are never assigned. Saving a
+comment opens the right-hand Threads sidebar.
 
-Each thread can be expanded or collapsed by clicking its row. Expanded threads
+The sidebar follows the review cursor: the assigned comment nearest the current line
+in the selected hunk is drawn as active, and a collapsed group that holds it is
+tinted. Each thread can be expanded or collapsed by clicking its row. Expanded threads
 list their assigned comments; clicking a comment navigates to its source line.
-Use **Ctrl+T** to navigate the sidebar by keyboard: `j`/`k` (or arrows) moves,
-and Enter expands a thread or jumps to a selected comment. With a group selected,
-**P** prompts its assigned agent (or opens the picker) and **A** opens its agent
-actions. The picker can select any eligible running agent in the current workspace
-(and matching worktree cwd when available), or start a new temporary agent. Agents
-started by this extension are labeled with their assigned group when shown in a
-later picker. A spinning indicator on a group means Herdr is starting its agent or
+
+**P**, **A**, **Ctrl+R** and **X** act on the comment under the review cursor, or on
+the keyboard-selected row while Threads navigation (**Ctrl+T**) is focused. A line
+with no comment shows a notice and does nothing. A comment saved before this session
+is filed in Unassigned the first time one of these keys reaches it. Use **Ctrl+T** to
+navigate the sidebar by keyboard: `j`/`k` (or arrows) moves, and Enter expands a thread
+or jumps to a selected comment.
+
+**P** prompts the group's assigned agent, or opens the picker if it has none. The
+picker's first row starts the configured default agent (or the only configured kind),
+naming its saved model; below it are the eligible running agents in the current
+workspace (and matching worktree cwd when available), then **Start another kind…**
+when more kinds are configured. Agents started by this extension are labeled with
+their assigned group when shown in a later picker. The prompt field then opens with a
+placeholder: pressing Enter on an empty field sends
+"Address every listed review comment and reply in its thread."; typed text is sent
+instead. A spinning indicator on a group means Herdr is starting its agent or
 sending it work; after Herdr observes its response, the indicator becomes a green
 checkmark. When creating an agent for **P**, the prompt field opens while it starts,
 and both delivery and the agent's turn are followed in the background, so every other
@@ -116,8 +134,10 @@ indefinite by design, so an agent that never reaches `idle`, `done`, or `blocked
 leaves that spinner running — resolving the group or stopping its agent ends it, and
 neither is blocked by the wait. Use **Check agent status** or reveal the agent for
 progress/results. Status-row text
-(where supported) is last-known state, not a background poll. Failed submissions
-retain the draft; uncertain delivery is never automatically retried.
+(where supported) is last-known state, not a background poll. The typed request is
+cleared from the group's draft as soon as it is handed to Herdr, so pressing **P**
+during the turn starts from an empty prompt; a failed hand-off restores it.
+Uncertain delivery is never automatically retried.
 
 ## Configuration
 
@@ -132,12 +152,13 @@ default_agent = "claude"
 `agents` controls both the existing-agent picker and temporary agent types.
 Supported values: `pi`, `claude`, `codex`, `gemini`, `opencode`. Omitted means
 all five; an empty list disables agent choices. Duplicates are removed.
-`default_agent` must be in `agents`; it is shown first (initially highlighted)
-in the temporary-agent picker and named in its title. You must still confirm;
-nothing is automatically launched or selected from existing panes.
-Without a default, the configured list order is used.
+`default_agent` must be in `agents`; it becomes the picker's first row
+(**+ Start claude (default)**), so Enter starts it. You must still confirm;
+nothing is automatically launched or selected from existing panes. Without a
+default, that row appears only when a single kind is configured; otherwise
+**Start temporary agent…** asks for the kind in the configured order.
 
-With Threads navigation focused, press **Ctrl+L** to configure Pi or Claude. The
+Press **Ctrl+L** to configure Pi or Claude. The
 model list is populated from Pi's local model store or Claude Code's cached model
 catalog; no model names are hardcoded. Choosing an agent normally afterwards starts
 it with the saved model (`--model <id>`). Choose the list's **Default** entry to clear
