@@ -4,9 +4,13 @@ import { agentConfig } from "./config.ts";
 import { removeThread, threadAtSelection } from "./threads.ts";
 import {
   ThreadsPane,
+  activateSelectedThreadItem,
   assignComment,
   createThread,
+  moveThreadSelection,
   removeAssignedComment,
+  startThreadNavigation,
+  stopThreadNavigation,
   suggestedThreadTitle,
   threadBoardSnapshot,
   threadForComment,
@@ -25,6 +29,22 @@ export default function register(hunk: HunkExtensionAPI) {
     placement: "right",
     width: { preferred: 42, min: 28, max: 72, fraction: 0.3 },
     component: ThreadsPane,
+  });
+  hunk.registerKeyboardMode({
+    id: "threads",
+    title: "Threads",
+    onEnter: () => { startThreadNavigation(); },
+    onExit: () => { stopThreadNavigation(); },
+    onKey: key => {
+      // Let the global visibility and focus commands keep their own bindings.
+      if (key.name === "t") return "pass";
+      if (key.name === "j" || key.name === "down") return moveThreadSelection(1) ? "handled" : "pass";
+      if (key.name === "k" || key.name === "up") return moveThreadSelection(-1) ? "handled" : "pass";
+      if (key.name === "enter" || key.name === "return" || key.name === "space") {
+        return activateSelectedThreadItem() ? "handled" : "pass";
+      }
+      return "pass";
+    },
   });
 
   let bridge: Bridge | undefined;
@@ -221,7 +241,25 @@ export default function register(hunk: HunkExtensionAPI) {
     });
   }
   command("menu", "Herdr: agent actions…", menu, "A");
-  command("threads", "Herdr: toggle threads sidebar", async ctx => ctx.panes.toggle("threads"), "T", false);
+  // Threads is independent of Herdr operations, so it remains closable while one is pending.
+  hunk.registerCommand({ id: "threads", title: "Herdr: toggle threads sidebar", key: "T" }, ctx => {
+    if (disposed) return;
+    if (ctx.panes.isOpen("threads")) {
+      ctx.keyboardModes.exitMode();
+      ctx.panes.close("threads");
+    } else {
+      ctx.panes.open("threads");
+    }
+  });
+  hunk.registerCommand({ id: "focus-threads", title: "Herdr: focus threads", key: "ctrl+t" }, ctx => {
+    if (disposed) return;
+    ctx.panes.open("threads");
+    if (!threadBoardSnapshot().threads.length) {
+      ctx.notify("No threads are available to navigate.", "warning");
+      return;
+    }
+    if (!ctx.keyboardModes.isActive("threads")) ctx.keyboardModes.enterMode("threads");
+  });
   command("pick", "Herdr: choose agent…", choose);
   command("prompt", "Herdr: prompt agent…", prompt, "P");
   command("status", "Herdr: check status", refresh);

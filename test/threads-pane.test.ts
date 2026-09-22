@@ -4,8 +4,12 @@ import type { ExtensionReviewNote } from "hunkdiff/extension";
 import {
   assignComment,
   createThread,
+  moveThreadSelection,
   removeAssignedComment,
   resetThreadBoard,
+  selectedThreadItem,
+  startThreadNavigation,
+  stopThreadNavigation,
   suggestedThreadTitle,
   threadBoardSnapshot,
   threadForComment,
@@ -30,6 +34,20 @@ test("creates expandable session threads and assigns comments", () => {
 
   toggleThread(created.id);
   assert.equal(threadBoardSnapshot().threads[0]?.expanded, false);
+});
+
+test("navigates expanded thread rows and clears the selection on mode exit", () => {
+  resetThreadBoard();
+  const created = createThread("Authentication", note("one", "Check auth handling"));
+  assignComment(created.id, note("two", "Add a regression test"));
+
+  assert.equal(startThreadNavigation(), true);
+  assert.equal(selectedThreadItem()?.kind, "thread");
+  moveThreadSelection(1);
+  assert.deepEqual(selectedThreadItem(), { kind: "comment", thread: threadBoardSnapshot().threads[0], comment: threadBoardSnapshot().threads[0]?.comments[0] });
+  stopThreadNavigation();
+  assert.equal(selectedThreadItem(), undefined);
+  assert.equal(threadBoardSnapshot().navigating, false);
 });
 
 test("updates and removes assigned comments without deleting the thread", () => {

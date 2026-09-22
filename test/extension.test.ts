@@ -15,12 +15,25 @@ function host(config: Record<string, unknown> = {}) {
   const notices: string[] = [];
   const options: string[][] = [];
   const openedPanes: string[] = [];
+  const openPanes = new Set<string>();
+  const keyboardModes = new Map<string, { onEnter?: () => void; onExit?: () => void }>();
+  let activeKeyboardMode: string | undefined;
   const events = new Map<string, (payload: unknown, ctx: unknown) => void | Promise<void>>();
-  const state = { live: true, inputCalls: 0, cliRegistered: false, paneRegistered: false };
+  const state = { live: true, inputCalls: 0, cliRegistered: false, paneRegistered: false, keyboardModeRegistered: false };
   const ctx = {
     cwd: "/review", review: { snapshot: () => state.live ? {} : null },
     selection: { file: null, hunkIndex: null }, notify: (text: string) => notices.push(text),
-    panes: { open: (id: string) => openedPanes.push(id), toggle: () => {} },
+    panes: {
+      open: (id: string) => { openPanes.add(id); openedPanes.push(id); },
+      close: (id: string) => { openPanes.delete(id); },
+      toggle: (id: string) => { openPanes.has(id) ? openPanes.delete(id) : openPanes.add(id); },
+      isOpen: (id: string) => openPanes.has(id),
+    },
+    keyboardModes: {
+      enterMode: (id: string) => { activeKeyboardMode = id; keyboardModes.get(id)?.onEnter?.(); return true; },
+      exitMode: () => { keyboardModes.get(activeKeyboardMode ?? "")?.onExit?.(); activeKeyboardMode = undefined; return true; },
+      isActive: (id?: string) => activeKeyboardMode !== undefined && (!id || activeKeyboardMode === id),
+    },
     dialogs: {
       select: async (arg: { options: string[] }) => { options.push(arg.options); return answers.shift() ?? null; },
       input: async () => { state.inputCalls++; return inputs.shift() ?? null; }, confirm: async () => false,
@@ -29,6 +42,7 @@ function host(config: Record<string, unknown> = {}) {
   register({
     apiVersion: 10, config,
     registerPane: () => { state.paneRegistered = true; },
+    registerKeyboardMode: (mode: { id: string; onEnter?: () => void; onExit?: () => void }) => { keyboardModes.set(mode.id, mode); state.keyboardModeRegistered = true; },
     registerCommand: (cmd: { id: string }, handler: (ctx: ExtensionCommandContext) => Promise<void> | void) => commands.set(cmd.id, handler),
     registerCliCommand: () => { state.cliRegistered = true; },
     on: (event: string, handler: (payload: unknown, ctx: unknown) => void | Promise<void>) => { events.set(event, handler); },
@@ -43,9 +57,10 @@ function host(config: Record<string, unknown> = {}) {
 
 test("registers discoverable commands and diagnostic CLI without requiring status-row API", () => {
   const h = host();
-  assert.deepEqual([...h.commands.keys()], ["menu", "threads", "pick", "prompt", "status", "reveal", "reveal-temporary", "hide", "stop", "resolve-thread"]);
+  assert.deepEqual([...h.commands.keys()], ["menu", "threads", "focus-threads", "pick", "prompt", "status", "reveal", "reveal-temporary", "hide", "stop", "resolve-thread"]);
   assert.equal(h.state.cliRegistered, true);
   assert.equal(h.state.paneRegistered, true);
+  assert.equal(h.state.keyboardModeRegistered, true);
 });
 
  test("saved user comments can create a thread and open the sidebar", async () => {
