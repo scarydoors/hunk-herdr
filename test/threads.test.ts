@@ -63,11 +63,24 @@ test("a note whose range contains the line wins over a closer edge", () => {
 test("refuses only an exact tie, naming how to break it", () => {
   const tie = threadAtSelection(snapshot([note("one", { line: 10 }), note("two", { line: 14 })]), selection(12));
   assert.equal(tie.kind, "ambiguous");
-  if (tie.kind === "ambiguous") assert.match(tie.message, /2 review threads are equally close/);
+  if (tie.kind === "ambiguous") assert.match(tie.message, /2 of your comments are equally close/);
 
   const noLine = threadAtSelection(snapshot([note("one"), note("two")]), selection(null));
   assert.equal(noLine.kind, "ambiguous");
   if (noLine.kind === "ambiguous") assert.match(noLine.message, /share this hunk/);
+});
+
+test("an agent's comment beside yours never makes the hunk ambiguous", () => {
+  const agentNote: ExtensionReviewSnapshotNote = { ...note("agent", { line: 12 }), source: "agent" };
+  const mine = note("mine", { line: 30 });
+  // Same line as the agent's comment, and no current line at all: still yours.
+  for (const at of [selection(12), selection(null)]) {
+    const match = threadAtSelection(snapshot([agentNote, mine]), at);
+    assert.equal(match.kind === "found" && match.root.id, "mine");
+  }
+  // With none of your comments in the hunk, the agent's thread is what X resolves.
+  const only = threadAtSelection(snapshot([agentNote]), selection(12));
+  assert.equal(only.kind === "found" && only.root.id, "agent");
 });
 
 test("falls back to the selected hunk when no exact line matches", () => {

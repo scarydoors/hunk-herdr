@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { ExtensionPaneProps, ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
+import { nearestToLine, type LineAddress, type LineAnchor } from "./threads.ts";
 
 export interface AssignedComment {
   readonly id: string;
@@ -9,6 +10,8 @@ export interface AssignedComment {
   readonly hunkIndex: number;
   readonly side: "old" | "new";
   readonly line: number;
+  /** Line geometry when the comment was saved; Hunk's later anchors are tracked separately. */
+  readonly anchor: LineAnchor;
 }
 
 export interface ReviewThread {
@@ -56,7 +59,8 @@ export const UNASSIGNED_THREAD_TITLE = "Unassigned";
 
 let board: ThreadBoardSnapshot = { threads: [], navigating: false };
 const listeners = new Set<() => void>();
-const navigationByCommentId = new Map<string, { side: "old" | "new"; line: number }>();
+/** Hunk's current anchor for each assigned comment, refreshed as the review changes. */
+const navigationByCommentId = new Map<string, LineAnchor>();
 
 function publish(next: ThreadBoardSnapshot) {
   board = next;
@@ -83,15 +87,12 @@ export function syncThreadCommentNavigation(snapshot: ExtensionReviewSnapshot | 
   if (snapshot === undefined) return;
   navigationByCommentId.clear();
   if (!snapshot || !Array.isArray(snapshot.notes)) return;
-  for (const note of snapshot.notes) {
-    const preferred = note.anchor.preferred;
-    if (preferred) navigationByCommentId.set(note.id, { side: preferred.side, line: preferred.line });
-  }
+  for (const note of snapshot.notes) navigationByCommentId.set(note.id, note.anchor);
 }
 
 /** Updates one current native note anchor by its stable comment ID. */
-export function updateThreadCommentNavigation(commentId: string, preferred: { side: "old" | "new"; line: number } | undefined): void {
-  if (preferred) navigationByCommentId.set(commentId, preferred);
+export function updateThreadCommentNavigation(commentId: string, anchor: LineAnchor | undefined): void {
+  if (anchor) navigationByCommentId.set(commentId, anchor);
   else navigationByCommentId.delete(commentId);
 }
 
@@ -100,42 +101,37 @@ export function threadForComment(commentId: string | undefined): ReviewThread | 
   return board.threads.find(thread => thread.comments.some(comment => comment.id === commentId));
 }
 
-/** The line a comment currently sits on: the live anchor when Hunk has reported one. */
-function commentLine(comment: AssignedComment): number {
-  return navigationByCommentId.get(comment.id)?.line ?? comment.line;
+/** Where a comment sits now: Hunk's live anchor when it has reported one. */
+function commentAnchor(comment: AssignedComment): LineAnchor {
+  return navigationByCommentId.get(comment.id) ?? comment.anchor;
+}
+
+function allComments(): { thread: ReviewThread; comment: AssignedComment }[] {
+  return board.threads.flatMap(thread => thread.comments.map(comment => ({ thread, comment })));
 }
 
 /**
- * The group holding the comment closest to `note` in the same file, or undefined
- * when no group has a comment in that file. Ties keep the earlier group.
+ * The group holding the comment nearest `note` in the same file, or undefined
+ * when no group has a comment there. Measured the way the cursor lookup is.
  */
-export function nearestThreadForNote(note: Pick<ExtensionReviewNote, "id" | "filePath" | "line">): ReviewThread | undefined {
-  let best: { thread: ReviewThread; distance: number } | undefined;
-  for (const thread of board.threads) {
-    for (const comment of thread.comments) {
-      if (comment.filePath !== note.filePath || comment.id === note.id) continue;
-      const distance = Math.abs(commentLine(comment) - note.line);
-      if (!best || distance < best.distance) best = { thread, distance };
-    }
-  }
-  return best?.thread;
+export function nearestThreadForNote(note: Pick<ExtensionReviewNote, "id" | "filePath" | "side" | "line">): ReviewThread | undefined {
+  const inFile = allComments().filter(({ comment }) => comment.filePath === note.filePath && comment.id !== note.id);
+  const nearest = nearestToLine(inFile, ({ comment }) => commentAnchor(comment), { side: note.side, line: note.line });
+  // A tie between groups is broken by board order, so a new comment is never left unfiled.
+  if (nearest.kind === "tie") return inFile.map(({ thread }) => thread).find(() => true);
+  return nearest.kind === "one" ? nearest.item.thread : undefined;
 }
 
 /**
  * The assigned comment the review cursor is on or nearest to, within the selected
- * file and hunk. Undefined when that hunk holds no assigned comment.
+ * file and hunk — the same rule `threadAtSelection` uses for commands. Undefined
+ * when the hunk holds no assigned comment, or when two are equally near.
  */
-export function commentAtCursor(filePath: string | undefined, hunkIndex: number | null, line: number | undefined): AssignedComment | undefined {
+export function commentAtCursor(filePath: string | undefined, hunkIndex: number | null, at: LineAddress | null | undefined): AssignedComment | undefined {
   if (!filePath || hunkIndex === null) return undefined;
-  let best: { comment: AssignedComment; distance: number } | undefined;
-  for (const thread of board.threads) {
-    for (const comment of thread.comments) {
-      if (comment.filePath !== filePath || comment.hunkIndex !== hunkIndex) continue;
-      const distance = line === undefined ? 0 : Math.abs(commentLine(comment) - line);
-      if (!best || distance < best.distance) best = { comment, distance };
-    }
-  }
-  return best?.comment;
+  const inHunk = allComments().filter(({ comment }) => comment.filePath === filePath && comment.hunkIndex === hunkIndex);
+  const nearest = nearestToLine(inHunk, ({ comment }) => commentAnchor(comment), at);
+  return nearest.kind === "one" ? nearest.item.comment : undefined;
 }
 
 /** Records which comment the pane is showing as active; a no-op when unchanged. */
@@ -159,6 +155,11 @@ function assignedComment(note: ExtensionReviewNote): AssignedComment {
     hunkIndex: note.hunkIndex,
     side: note.side,
     line: note.line,
+    anchor: {
+      ...(note.oldRange ? { oldRange: note.oldRange } : {}),
+      ...(note.newRange ? { newRange: note.newRange } : {}),
+      preferred: { side: note.side, line: note.line },
+    },
   };
 }
 
@@ -470,9 +471,9 @@ function revealComment(comment: AssignedComment, files: ExtensionPaneProps["file
     actions.notify(`Comment file is not visible: ${comment.filePath}`, "warning");
     return;
   }
-  const anchor = navigationByCommentId.get(comment.id);
-  if (anchor) {
-    actions.revealLine(file.id, anchor.side, anchor.line);
+  const preferred = navigationByCommentId.get(comment.id)?.preferred;
+  if (preferred) {
+    actions.revealLine(file.id, preferred.side, preferred.line);
     return;
   }
   actions.revealLine(file.id, comment.side, comment.line);
@@ -491,7 +492,7 @@ export function activateSelectedThreadItem(): boolean {
 export function ThreadsPane({ files, theme, actions, width, selectedFileId, selectedHunkIndex, currentLine }: ExtensionPaneProps): ReactNode {
   const state = useThreadBoard();
   const cursorFile = selectedFileId === null ? undefined : files.find(file => file.id === selectedFileId)?.path;
-  const active = commentAtCursor(cursorFile, selectedHunkIndex, currentLine?.line);
+  const active = commentAtCursor(cursorFile, selectedHunkIndex, currentLine ? { side: currentLine.side, line: currentLine.line } : null);
   useEffect(() => { setCursorComment(active?.id); }, [active?.id]);
   const dispatching = state.threads.some(thread => thread.dispatching);
   const [throbberFrame, setThrobberFrame] = useState(0);

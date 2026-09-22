@@ -10,19 +10,54 @@ export type ThreadMatch =
   | { kind: "none"; message: string }
   | { kind: "ambiguous"; message: string };
 
+/** The line geometry of a saved comment, as both snapshot notes and Threads comments carry it. */
+export interface LineAnchor {
+  readonly oldRange?: readonly [number, number];
+  readonly newRange?: readonly [number, number];
+  readonly preferred?: { readonly side: "old" | "new"; readonly line: number };
+}
+
+export interface LineAddress {
+  readonly side: "old" | "new";
+  readonly line: number;
+}
+
 /**
- * How far a note sits from the cursor line on that side: 0 when its anchor range
- * contains the line, otherwise the gap to the nearer edge. A note with no range
- * on that side is measured from its preferred line, if that is on the side.
+ * How far an anchor sits from a line on that side: 0 when its range contains
+ * the line, otherwise the gap to the nearer edge. An anchor with no range on
+ * that side is measured from its preferred line when that is on the side.
  */
-function distanceToLine(note: ExtensionReviewSnapshotNote, side: "old" | "new", line: number): number {
-  const range = side === "old" ? note.anchor.oldRange : note.anchor.newRange;
+export function distanceToLine(anchor: LineAnchor, at: LineAddress): number {
+  const range = at.side === "old" ? anchor.oldRange : anchor.newRange;
   if (range !== undefined) {
-    if (line >= range[0] && line <= range[1]) return 0;
-    return line < range[0] ? range[0] - line : line - range[1];
+    if (at.line >= range[0] && at.line <= range[1]) return 0;
+    return at.line < range[0] ? range[0] - at.line : at.line - range[1];
   }
-  if (note.anchor.preferred?.side === side) return Math.abs(note.anchor.preferred.line - line);
+  if (anchor.preferred?.side === at.side) return Math.abs(anchor.preferred.line - at.line);
   return Number.POSITIVE_INFINITY;
+}
+
+export type Nearest<T> =
+  | { kind: "one"; item: T; distance: number }
+  | { kind: "tie"; count: number }
+  | { kind: "none" };
+
+/**
+ * The one item nearest a line, by `distanceToLine`. Without a line every item is
+ * equally near, so more than one is a tie. This is the single rule behind the
+ * Threads pane's active comment and the thread a command acts on.
+ */
+export function nearestToLine<T>(items: readonly T[], anchorOf: (item: T) => LineAnchor, at: LineAddress | null | undefined): Nearest<T> {
+  let best: { item: T; distance: number } | undefined;
+  let tied = 0;
+  for (const item of items) {
+    const distance = at ? distanceToLine(anchorOf(item), at) : 0;
+    if (!best || distance < best.distance) { best = { item, distance }; tied = 1; }
+    else if (distance === best.distance) tied++;
+  }
+  if (!best) return { kind: "none" };
+  if (tied > 1) return { kind: "tie", count: tied };
+  return { kind: "one", item: best.item, distance: best.distance };
 }
 
 function rootId(note: ExtensionReviewSnapshotNote, byId: ReadonlyMap<string, ExtensionReviewSnapshotNote>): string | null {
@@ -56,10 +91,11 @@ function depth(note: ExtensionReviewSnapshotNote, byId: ReadonlyMap<string, Exte
 /**
  * Find the thread the cursor is on or nearest to within the selected hunk.
  *
- * Every thread in the hunk is ranked by its distance to the current line, so a
- * hunk with several comments resolves to the closest one — the same comment the
- * Threads pane highlights. Only an exact tie between two threads is refused.
- * Without a current line, a hunk with more than one thread is ambiguous.
+ * The user's own threads in the hunk are ranked by their distance to the current
+ * line, so a hunk with several comments resolves to the closest one — the same
+ * comment the Threads pane highlights. Agent and AI threads count only when the
+ * hunk holds none of the user's. Only an exact tie between two threads is
+ * refused; without a current line, several threads in one hunk are a tie.
  */
 export function threadAtSelection(snapshot: ExtensionReviewSnapshot, selection: ExtensionReviewSelection): ThreadMatch {
   if (!selection.file || selection.hunkIndex === null) {
@@ -75,28 +111,27 @@ export function threadAtSelection(snapshot: ExtensionReviewSnapshot, selection: 
 
   // Rank each thread by its closest note; the cursor line is compared against the
   // side it addresses, since context rows carry the new-side number.
-  const byRoot = new Map<string, number>();
+  const rootsInHunk = new Map<string, ExtensionReviewSnapshotNote[]>();
   for (const note of atHunk) {
     const root = rootId(note, byId);
     if (root === null) continue;
-    const distance = selection.currentLine
-      ? distanceToLine(note, selection.currentLine.side, selection.currentLine.line)
-      : 0;
-    byRoot.set(root, Math.min(byRoot.get(root) ?? Number.POSITIVE_INFINITY, distance));
+    rootsInHunk.set(root, [...(rootsInHunk.get(root) ?? []), note]);
   }
-  if (byRoot.size === 0) return { kind: "none", message: "No review thread at the current location." };
-
-  const ranked = [...byRoot.entries()].sort((left, right) => left[1] - right[1]);
-  const [id, nearest] = ranked[0]!;
-  if (ranked.length > 1 && ranked[1]![1] === nearest) {
-    const tied = ranked.filter(([, distance]) => distance === nearest).length;
+  // Threads groups hold the user's own root comments, so those are what a key at
+  // the cursor means; an agent's comment beside yours must not make it ambiguous.
+  const roots = [...rootsInHunk.entries()];
+  const own = roots.filter(([id]) => byId.get(id)?.source === "user");
+  const nearest = nearestToLine(own.length ? own : roots, ([, group]) => closestAnchor(group, selection.currentLine), selection.currentLine);
+  if (nearest.kind === "none") return { kind: "none", message: "No review thread at the current location." };
+  if (nearest.kind === "tie") {
     return {
       kind: "ambiguous",
       message: selection.currentLine
-        ? `${tied} review threads are equally close to this line; move onto one of them.`
-        : `${tied} review threads share this hunk; move onto one of them.`,
+        ? `${nearest.count} of your comments are equally close to this line; move onto one of them.`
+        : `${nearest.count} of your comments share this hunk and no line is current; move onto one of them.`,
     };
   }
+  const [id] = nearest.item;
 
   const root = byId.get(id);
   if (!root) return { kind: "none", message: "The review thread is no longer available." };
@@ -104,6 +139,13 @@ export function threadAtSelection(snapshot: ExtensionReviewSnapshot, selection: 
     .filter(note => rootId(note, byId) === root.id)
     .sort((left, right) => depth(right, byId) - depth(left, byId));
   return { kind: "found", root, notes: thread };
+}
+
+/** A thread is as near as its nearest note, so rank it by that note's anchor. */
+function closestAnchor(group: readonly ExtensionReviewSnapshotNote[], at: LineAddress | null): LineAnchor {
+  if (!at) return group[0]!.anchor;
+  const nearest = nearestToLine(group, note => note.anchor, at);
+  return nearest.kind === "one" ? nearest.item.anchor : group[0]!.anchor;
 }
 
 type SessionList = {
