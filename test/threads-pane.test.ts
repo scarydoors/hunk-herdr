@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
 import {
   assignComment,
+  asRendered,
   commentRowText,
   createThread,
   createThreadFromComment,
@@ -291,4 +292,14 @@ test("rows name the group's agent and a comment's replies, dropping suffixes bef
   assert.equal(groupRowText(thread, 0, 28), " ▾   Authentication (1)");
   setThreadAgent(created.id, undefined);
   assert.equal(threadBoardSnapshot().threads[0]?.agent, undefined);
+});
+
+test("a comment is drawn orphaned while its file is out of the diff, and restored when it's back", () => {
+  const comment = {
+    id: "user:one", filePath: "src/auth.ts", hunkIndex: 0, side: "new" as const, line: 12,
+    body: "Handle expiry", anchor: {}, resolution: "active" as const,
+  };
+  assert.equal(asRendered(comment, []).resolution, "orphaned");
+  assert.equal(commentRowText(asRendered(comment, []), false, 40), "   └ ✗ Handle expiry");
+  assert.equal(asRendered(comment, [{ path: "src/auth.ts" }]), comment, "unchanged while its file is shown");
 });
