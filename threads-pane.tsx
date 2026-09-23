@@ -607,6 +607,18 @@ export function resetThreadBoard(): void {
   publish({ threads: [], navigating: false, helpVisible: false });
 }
 
+/**
+ * A comment as the review renders it right now. Hunk keeps calling a note "active" after
+ * its file leaves the diff (the change was reverted), though it no longer renders it and
+ * refuses replies to it. The pane's file list is fresh on every reload, so a comment is
+ * marked the moment its file goes, and unmarked the moment it's back under the same ID.
+ */
+export function asRendered(comment: AssignedComment, files: readonly { readonly path: string }[]): AssignedComment {
+  return comment.resolution === "orphaned" || files.some(file => file.path === comment.filePath)
+    ? comment
+    : { ...comment, resolution: "orphaned" };
+}
+
 /** A group's row: state glyph, title, comment count, then the agent serving it. */
 export function groupRowText(thread: ReviewThread, throbberFrame: number, width: number): string {
   const glyph = thread.dispatching ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[throbberFrame % 10] : thread.attention ? "!" : thread.completed ? "✓" : " ";
@@ -733,7 +745,8 @@ export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps
               }}
               onMouseDown={() => toggleThread(thread.id)}
             />,
-            ...(thread.expanded ? thread.comments.map(comment => {
+            ...(thread.expanded ? thread.comments.map(shown => {
+              const comment = asRendered(shown, files);
               const selected = comment.id === selectedComment?.id;
               return (
                 <text

@@ -172,6 +172,16 @@ export async function removeThread(run: Run, cwd: string, generation: string, no
 }
 
 /**
+ * Hunk's verdict on a saved note, corrected for one gap in it: a note whose file has
+ * left the review (its change was reverted) keeps reporting "active" at its old anchor,
+ * yet Hunk no longer renders it and refuses replies to it. Such a note counts as
+ * orphaned until its file is back, when Hunk shows it again under the same ID.
+ */
+export function shownResolution(note: ExtensionReviewSnapshotNote, snapshot: ExtensionReviewSnapshot): ExtensionReviewSnapshotNote["resolution"] {
+  return snapshot.files.some(file => file.fileKey === note.fileKey) ? note.resolution : "orphaned";
+}
+
+/**
  * Each requested root comment's conversation as the agent should read it: the
  * root, then its replies in saved order. Roots Hunk no longer renders, or no
  * longer holds, are returned as skipped rather than sent.
@@ -186,8 +196,8 @@ export function conversationsForPrompt(snapshot: ExtensionReviewSnapshot, rootId
     const at = root && (root.anchor.preferred
       ?? (root.anchor.newRange ? { side: "new" as const, line: root.anchor.newRange[0] } : undefined)
       ?? (root.anchor.oldRange ? { side: "old" as const, line: root.anchor.oldRange[0] } : undefined));
-    if (!root || root.resolution === "orphaned" || !at) { skipped.push(id); continue; }
-    const notes = snapshot.notes.filter(note => note.resolution !== "orphaned" && rootId(note, byId) === root.id);
+    if (!root || shownResolution(root, snapshot) === "orphaned" || !at) { skipped.push(id); continue; }
+    const notes = snapshot.notes.filter(note => shownResolution(note, snapshot) !== "orphaned" && rootId(note, byId) === root.id);
     conversations.push({
       replyTo: root.id,
       filePath: paths.get(root.fileKey) ?? root.fileKey,

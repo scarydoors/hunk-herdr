@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionReviewSelection, ExtensionReviewSnapshot, ExtensionReviewSnapshotNote } from "hunkdiff/extension";
-import { nearestToLine, removeThread, threadAtSelection, threadsForCommentIds, type LineAnchor } from "../threads.ts";
+import { conversationsForPrompt, nearestToLine, removeThread, threadAtSelection, threadsForCommentIds, type LineAnchor } from "../threads.ts";
 import type { Run } from "../bridge.ts";
 
 function note(id: string, options: { parentId?: string; line?: number; hunk?: number } = {}): ExtensionReviewSnapshotNote {
@@ -100,4 +100,14 @@ test("nearestToLine measures by range containment, then by gap, and reports exac
   assert.deepEqual(nearestToLine([], by, { side: "new", line: 1 }), { kind: "none" });
   // An anchor with nothing on the line's side is infinitely far, never a match on distance.
   assert.deepEqual(nearestToLine(["far"], by, { side: "new", line: 5 }), { kind: "one", item: "far", distance: Number.POSITIVE_INFINITY });
+});
+
+test("a comment whose file left the review is skipped, though Hunk still calls it active", () => {
+  // Verified live on Hunk 0.22.0: reverting a file keeps its notes "active" at their old
+  // anchors in the snapshot, while Hunk refuses replies to them until the change is back.
+  const shown = note("shown");
+  const reverted = { ...note("reverted"), fileKey: "file:gone" };
+  const result = conversationsForPrompt(snapshot([shown, reverted]), ["shown", "reverted"]);
+  assert.deepEqual(result.conversations.map(conversation => conversation.replyTo), ["shown"]);
+  assert.deepEqual(result.skipped, ["reverted"]);
 });

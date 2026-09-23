@@ -73,6 +73,17 @@ where Hunk itself shows the note. Whatever verdict Hunk does report is shown too
 run a Threads command. A watch reload emits no note event and cannot be read from an
 event handler, so those marks catch up on your next key rather than instantly.
 
+Reverting a file's change is the exception, and it is handled at once. Hunk keeps that
+file's notes in its snapshot, still reported active at their old lines, but stops
+rendering them and refuses replies to them. The sidebar checks each comment's file
+against the files it is drawn with, which are fresh on every reload, so those comments
+show ✗ the moment the file leaves the diff and lose it when the change is back (Hunk
+restores the same note IDs). **P** skips them meanwhile; **X** still resolves them.
+
+All Threads state lives in the Hunk process, so reloads keep it: watch reloads,
+the refresh key, and `hunk session reload` onto other content. Only quitting Hunk or a
+crash loses it, and quitting closes the temporary agents this session started.
+
 **P** prompts the group's assigned agent, or opens the picker if it has none. The
 picker's first row starts the configured default agent (or the only configured kind),
 naming its saved model; below it are the eligible running agents in the current
