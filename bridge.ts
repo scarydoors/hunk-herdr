@@ -190,6 +190,10 @@ export class Bridge {
   async sessionId(generation: string): Promise<string> {
     return sessionIdForGeneration(this.exec, this.cwd, generation);
   }
+  /** Herdr's own notification, seen even when Hunk isn't; best effort, never throws. */
+  async notify(title: string, body: string, sound: "done" | "request" | "none"): Promise<void> {
+    await this.api(["notification", "show", title, "--body", body, "--sound", sound]).catch(() => {});
+  }
   async reveal(target: Pane): Promise<void> {
     const agent = await this.validate(target);
     const caller = await this.caller();

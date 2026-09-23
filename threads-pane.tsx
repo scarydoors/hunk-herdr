@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { ExtensionPaneProps, ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
+import type { ExtensionPaneProps, ExtensionReviewNote, ExtensionReviewSnapshot, ExtensionReviewSnapshotNote } from "hunkdiff/extension";
 import { nearestToLine, type LineAnchor } from "./threads.ts";
 
 export interface AssignedComment {
@@ -18,6 +18,17 @@ export interface AssignedComment {
    * is no longer rendered at all. Undefined until a snapshot has been read.
    */
   readonly resolution?: "active" | "stale" | "orphaned";
+  /** Agent replies anywhere in this comment's native conversation, nested ones included. */
+  readonly replyIds?: readonly string[];
+  /** The subset of replyIds not yet seen: shown since this comment was last selected in Threads. */
+  readonly unreadReplyIds?: readonly string[];
+}
+
+/** The agent serving a group, as the row names it. The pane never talks to Herdr. */
+export interface ThreadAgentLabel {
+  readonly label: string;
+  /** A temporary agent this Hunk session started and will close. */
+  readonly owned: boolean;
 }
 
 export interface ReviewThread {
@@ -29,6 +40,9 @@ export interface ReviewThread {
   readonly dispatching?: boolean;
   /** True when the group's most recently dispatched prompt settled successfully. */
   readonly completed?: boolean;
+  /** Why the group's agent stopped short (blocked, failed to start or receive work); kept until the user acts. */
+  readonly attention?: string;
+  readonly agent?: ThreadAgentLabel;
 }
 
 export interface ThreadBoardSnapshot {
@@ -97,18 +111,102 @@ export function threadBoardSnapshot(): ThreadBoardSnapshot {
 export function syncCommentsWithReview(snapshot: ExtensionReviewSnapshot | null | undefined): void {
   if (!snapshot || !Array.isArray(snapshot.notes)) return;
   const byId = new Map(snapshot.notes.map(note => [note.id, note]));
-  for (const note of snapshot.notes) navigationByCommentId.set(note.id, note.anchor);
+  const children = new Map<string, ExtensionReviewSnapshotNote[]>();
+  for (const note of snapshot.notes) {
+    navigationByCommentId.set(note.id, note.anchor);
+    if (note.parentId) children.set(note.parentId, [...children.get(note.parentId) ?? [], note]);
+  }
   let changed = false;
   const threads = board.threads.map(thread => {
+    let threadChanged = false;
     const comments = thread.comments.map(comment => {
       const resolution = byId.get(comment.id)?.resolution ?? "orphaned";
-      if (comment.resolution === resolution) return comment;
-      changed = true;
-      return { ...comment, resolution };
+      const replies = withReplies(comment, agentReplyIds(comment.id, children));
+      if (comment.resolution === resolution && replies === comment) return comment;
+      threadChanged = true;
+      return { ...replies, resolution };
     });
-    return changed ? { ...thread, comments } : thread;
+    changed ||= threadChanged;
+    return threadChanged ? { ...thread, comments } : thread;
   });
   if (changed) publish({ ...board, threads });
+}
+
+/** Every agent-authored note below a root, however deeply nested, in snapshot order. */
+function agentReplyIds(rootId: string, children: ReadonlyMap<string, readonly ExtensionReviewSnapshotNote[]>): string[] {
+  const found: string[] = [];
+  const walk = (id: string) => {
+    for (const child of children.get(id) ?? []) {
+      if (child.source !== "user") found.push(child.id);
+      walk(child.id);
+    }
+  };
+  walk(rootId);
+  return found;
+}
+
+function isShownInThreads(commentId: string): boolean {
+  return board.navigating && !!board.selectedKey?.startsWith("comment:") && board.selectedKey.endsWith(`:${commentId}`);
+}
+
+/**
+ * Sets a comment's agent replies. IDs it hadn't seen are unread unless the comment
+ * is selected in Threads right now, which shows them in the diff. Returns the same
+ * object when nothing changed.
+ */
+function withReplies(comment: AssignedComment, replyIds: readonly string[]): AssignedComment {
+  const before = comment.replyIds ?? [];
+  const known = new Set(before);
+  const current = new Set(replyIds);
+  const shown = isShownInThreads(comment.id);
+  const unread = [
+    ...(comment.unreadReplyIds ?? []).filter(id => current.has(id) && !shown),
+    ...(shown ? [] : replyIds.filter(id => !known.has(id))),
+  ];
+  const same = (left: readonly string[], right: readonly string[]) => left.length === right.length && left.every((id, index) => id === right[index]);
+  if (same(before, replyIds) && same(comment.unreadReplyIds ?? [], unread)) return comment;
+  return { ...comment, replyIds, unreadReplyIds: unread };
+}
+
+function updateComments(update: (comment: AssignedComment) => AssignedComment): void {
+  let changed = false;
+  const threads = board.threads.map(thread => {
+    let threadChanged = false;
+    const comments = thread.comments.map(comment => {
+      const next = update(comment);
+      threadChanged ||= next !== comment;
+      return next;
+    });
+    changed ||= threadChanged;
+    return threadChanged ? { ...thread, comments } : thread;
+  });
+  if (changed) publish({ ...board, threads });
+}
+
+/**
+ * Follows one saved note from \`note_changed\` into the reply counts. A reply joins the
+ * comment whose conversation holds its parent; one nested under a note this board
+ * doesn't track waits for the next snapshot sync, which walks the whole tree.
+ */
+export function recordReviewNote(kind: "created" | "updated" | "removed", note: ExtensionReviewSnapshotNote): void {
+  if (kind === "removed") {
+    updateComments(comment => comment.replyIds?.includes(note.id)
+      ? withReplies(comment, comment.replyIds.filter(id => id !== note.id))
+      : comment);
+    return;
+  }
+  if (!note.parentId || note.source === "user") return;
+  const parentId = note.parentId;
+  updateComments(comment => (comment.id === parentId || comment.replyIds?.includes(parentId)) && !comment.replyIds?.includes(note.id)
+    ? withReplies(comment, [...comment.replyIds ?? [], note.id])
+    : comment);
+}
+
+/** Selecting a comment in Threads reveals it with its replies, so they count as read. */
+export function markRepliesRead(commentId: string): void {
+  updateComments(comment => comment.id === commentId && comment.unreadReplyIds?.length
+    ? { ...comment, unreadReplyIds: [] }
+    : comment);
 }
 
 /** Updates one current native note anchor by its stable comment ID. */
@@ -179,7 +277,8 @@ export function createThread(title: string, note: ExtensionReviewNote): ReviewTh
 
 export function assignComment(threadId: string, note: ExtensionReviewNote): boolean {
   let assigned = false;
-  const comment = assignedComment(note);
+  const existing = board.threads.flatMap(thread => thread.comments).find(candidate => candidate.id === note.id);
+  const comment = { ...existing, ...assignedComment(note) };
   const threads = board.threads.map(thread => {
     const without = thread.comments.filter(candidate => candidate.id !== note.id);
     if (thread.id !== threadId) {
@@ -342,7 +441,7 @@ export function setThreadDispatching(threadId: string, dispatching: boolean): vo
   const threads = board.threads.map(thread => {
     if (thread.id !== threadId || !!thread.dispatching === dispatching) return thread;
     changed = true;
-    return { ...thread, dispatching, ...(dispatching ? { completed: false } : {}) };
+    return { ...thread, dispatching, ...(dispatching ? { completed: false, attention: undefined } : {}) };
   });
   if (changed) publish({ ...board, threads });
 }
@@ -358,15 +457,37 @@ export function setThreadCompleted(threadId: string): void {
   if (changed) publish({ ...board, threads });
 }
 
+/** Names the agent serving a group on its row, or clears it once the group has none. */
+export function setThreadAgent(threadId: string, agent: ThreadAgentLabel | undefined): void {
+  let changed = false;
+  const threads = board.threads.map(thread => {
+    if (thread.id !== threadId || (thread.agent?.label === agent?.label && thread.agent?.owned === agent?.owned)) return thread;
+    changed = true;
+    return { ...thread, agent };
+  });
+  if (changed) publish({ ...board, threads });
+}
+
+/** Marks a group whose agent needs the user, or clears the mark once they've acted. */
+export function setThreadAttention(threadId: string, reason: string | undefined): void {
+  let changed = false;
+  const threads = board.threads.map(thread => {
+    if (thread.id !== threadId || thread.attention === reason) return thread;
+    changed = true;
+    return { ...thread, attention: reason, ...(reason ? { completed: false } : {}) };
+  });
+  if (changed) publish({ ...board, threads });
+}
+
 export function updateAssignedComment(note: ExtensionReviewNote): void {
-  const comment = assignedComment(note);
   let changed = false;
   const threads = board.threads.map(thread => {
     const index = thread.comments.findIndex(candidate => candidate.id === note.id);
     if (index < 0) return thread;
     changed = true;
     const comments = [...thread.comments];
-    comments[index] = comment;
+    // An edited body keeps the conversation's replies and Hunk's last verdict.
+    comments[index] = { ...comments[index], ...assignedComment(note) };
     return { ...thread, comments };
   });
   if (changed) publish({ ...board, threads });
@@ -461,6 +582,42 @@ export function resetThreadBoard(): void {
   publish({ threads: [], navigating: false, helpVisible: false });
 }
 
+/** A group's row: state glyph, title, comment count, then the agent serving it. */
+export function groupRowText(thread: ReviewThread, throbberFrame: number, width: number): string {
+  const glyph = thread.dispatching ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[throbberFrame % 10] : thread.attention ? "!" : thread.completed ? "✓" : " ";
+  return fitRow(` ${thread.expanded ? "▾" : "▸"} ${glyph} `, thread.title, ` (${thread.comments.length})`, agentSuffixes(thread.agent), width);
+}
+
+/** A comment's row: Hunk's verdict, the body's first line, then its agent replies. */
+export function commentRowText(comment: AssignedComment, selected: boolean, width: number): string {
+  // Hunk's own verdict, as it marks a note whose line changed under it (●) or no longer shows (✗).
+  const mark = comment.resolution === "stale" ? "● " : comment.resolution === "orphaned" ? "✗ " : "";
+  return fitRow(`   ${selected ? "›" : "└"} ${mark}`, comment.body, "", replySuffixes(comment), width);
+}
+
+/**
+ * One pane row: the text truncates first, and the first optional suffix that still
+ * leaves it 8 columns is kept, so a long title never pushes "· claude" off the row.
+ */
+function fitRow(prefix: string, text: string, tail: string, suffixes: readonly string[], width: number): string {
+  const room = (suffix: string) => width - 2 - prefix.length - tail.length - suffix.length;
+  const suffix = suffixes.find(candidate => room(candidate) >= 8) ?? "";
+  return `${prefix}${oneLine(text, Math.max(8, room(suffix)))}${tail}${suffix}`;
+}
+
+function agentSuffixes(agent: ThreadAgentLabel | undefined): readonly string[] {
+  return agent ? [` · ${agent.label}${agent.owned ? " ⌁" : ""}`] : [];
+}
+
+/** Longest first: "· 2 replies (1 new)", then "· 2 (1 new)", then just the unread mark. */
+function replySuffixes(comment: AssignedComment): readonly string[] {
+  const count = comment.replyIds?.length ?? 0;
+  if (!count) return [];
+  const unread = comment.unreadReplyIds?.length ?? 0;
+  const fresh = unread ? ` (${unread} new)` : "";
+  return [` · ${count} repl${count === 1 ? "y" : "ies"}${fresh}`, ` · ${count}${fresh}`, ...(unread ? [" · new"] : [])];
+}
+
 function oneLine(text: string, width: number): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   return normalized.length > width ? `${normalized.slice(0, Math.max(1, width - 1))}…` : normalized;
@@ -496,7 +653,9 @@ export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps
   const selectedComment = state.navigating && selection?.kind === "comment" ? selection.comment : undefined;
   // The sidebar is the cursor: moving the selection onto a comment shows it in the diff.
   useEffect(() => {
-    if (selectedComment) revealComment(selectedComment, files, actions, true);
+    if (!selectedComment) return;
+    revealComment(selectedComment, files, actions, true);
+    markRepliesRead(selectedComment.id);
   }, [selectedComment?.id]);
   const dispatching = state.threads.some(thread => thread.dispatching);
   const [throbberFrame, setThrobberFrame] = useState(0);
@@ -542,23 +701,21 @@ export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps
           return [
             <text
               key={thread.id}
-              content={` ${thread.expanded ? "▾" : "▸"} ${thread.dispatching ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[throbberFrame % 10] : thread.completed ? "✓" : " "} ${oneLine(thread.title, Math.max(8, width - 12))} (${thread.comments.length})`}
+              content={groupRowText(thread, throbberFrame, width)}
               style={{
-                fg: thread.completed && !thread.dispatching ? theme.badgeAdded : theme.text,
+                fg: thread.dispatching ? theme.text : thread.attention ? theme.badgeRemoved : thread.completed ? theme.badgeAdded : theme.text,
                 bg: state.selectedKey === `thread:${thread.id}` ? theme.panelAlt : theme.panel,
               }}
               onMouseDown={() => toggleThread(thread.id)}
             />,
             ...(thread.expanded ? thread.comments.map(comment => {
               const selected = comment.id === selectedComment?.id;
-              // Hunk's own verdict, as it marks a note whose line changed under it (●) or no longer shows (✗).
-              const mark = comment.resolution === "stale" ? "● " : comment.resolution === "orphaned" ? "✗ " : "";
               return (
                 <text
                   key={`${thread.id}:${comment.id}`}
-                  content={`   ${selected ? "›" : "└"} ${mark}${oneLine(comment.body, Math.max(8, width - 7 - mark.length))}`}
+                  content={commentRowText(comment, selected, width)}
                   style={{
-                    fg: comment.resolution === "orphaned" ? theme.badgeRemoved : selected ? theme.accent : comment.resolution === "stale" ? theme.text : theme.muted,
+                    fg: comment.resolution === "orphaned" ? theme.badgeRemoved : selected ? theme.accent : comment.resolution === "stale" || comment.unreadReplyIds?.length ? theme.text : theme.muted,
                     bg: state.selectedKey === `comment:${thread.id}:${comment.id}` ? theme.panelAlt : theme.panel,
                   }}
                   onMouseDown={() => revealComment(comment, files, actions)}

@@ -74,7 +74,15 @@ their assigned group when shown in a later picker. The prompt field then opens w
 placeholder: pressing Enter on an empty field asks the agent to reply to each of the
 group's comments; typed text is sent as additional guidance on top of that task. A spinning indicator on a group means Herdr is starting its agent or
 sending it work; after Herdr observes its response, the indicator becomes a green
-checkmark. When creating an agent for **P**, the prompt field opens while it starts,
+checkmark. A red **!** means the agent needs you: it ended its turn `blocked` (a
+trust, login or permission prompt in its hidden pane), failed to start, or didn't
+receive the prompt. The mark stays until you reveal the agent, prompt the group
+again, stop its agent, or resolve the group. A group row also names its agent
+(**· claude**), with **⌁** when it's a temporary agent this Hunk session started
+and will close. A comment row counts the agent replies in its conversation, nested
+ones included (**· 2 replies (1 new)**); your own replies aren't counted. Replies
+are new until you select the comment in Threads, which shows them in the diff, and
+this read state lasts only as long as the Hunk session. When creating an agent for **P**, the prompt field opens while it starts,
 and both delivery and the agent's turn are followed in the background, so every other
 command stays usable while a group is working. Each prompt lists the group's conversations, each with the one
 comment ID to reply to, and rules out acting on any other review comment. Press **Ctrl+R** on
@@ -158,8 +166,7 @@ agent's turn finishing, and the group's spinner runs in between. Herdr's waits a
 indefinite by design, so an agent that never reaches `idle`, `done`, or `blocked`
 leaves that spinner running — resolving the group or stopping its agent ends it, and
 neither is blocked by the wait. Use **Check agent status** or reveal the agent for
-progress/results. Status-row text
-(where supported) is last-known state, not a background poll. The typed request is
+progress/results. The group's row mark is last-known state, not a background poll. The typed request is
 cleared from the group's draft as soon as it is handed to Herdr, so pressing **P**
 during the turn starts from an empty prompt; a failed hand-off restores it.
 Uncertain delivery is never automatically retried.
@@ -172,6 +179,7 @@ Use Hunk's native config in `~/.config/hunk/config.toml` (or its XDG location):
 [extension.hunk-herdr]
 agents = ["claude", "pi"]
 default_agent = "claude"
+notifications = "both"
 ```
 
 `agents` controls both the existing-agent picker and temporary agent types.
@@ -182,6 +190,11 @@ all five; an empty list disables agent choices. Duplicates are removed.
 nothing is automatically launched or selected from existing panes. Without a
 default, that row appears only when a single kind is configured; otherwise
 **Start temporary agent…** asks for the kind in the configured order.
+
+`notifications` says where a group's turn is announced when it finishes or needs
+attention: `"hunk"` (a Hunk toast, seen only while you look at Hunk), `"herdr"` (a
+Herdr notification, with the `done` or `request` sound, seen anywhere in the session)
+or `"both"`, the default. The Threads row marks (✓, **!**) show either way.
 
 Press **Ctrl+L** to configure Pi or Claude. The
 model list is populated from Pi's local model store or Claude Code's cached model
@@ -255,8 +268,7 @@ on older Node versions, but tests do not load Hunk's renderer.
 
 The manifest and folder layout are ready to move into a separate git repository.
 Before publishing, choose a license, tag a release and add the `hunk-extension`
-GitHub topic. Hunk's npm 0.22.0 declarations lag its bundled API-28 skill docs, so
-status-row support is feature-detected; the required base API is 10.
+GitHub topic. The required base Hunk extension API is 10.
 
 Tests cover workspace isolation, identity checks, split/zoom ordering, startup
 failure recovery, cancellation, stale reviews, concurrent actions, prompt

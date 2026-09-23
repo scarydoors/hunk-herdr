@@ -183,3 +183,13 @@ test("follow-ups skip re-reading the skill, and typed text is added as guidance"
   assert.match(payload, /Task: answer each review conversation/, "guidance never replaces the task");
 });
 
+
+test("notify shows a Herdr notification and swallows Herdr failures", async () => {
+  const calls: string[][] = [];
+  const bridge = new Bridge("/review", async (_binary, args) => {
+    calls.push(args);
+    throw new Error("herdr is gone");
+  });
+  await bridge.notify("Hunk · pi", "Authentication needs attention", "request");
+  assert.deepEqual(calls, [["notification", "show", "Hunk · pi", "--body", "Authentication needs attention", "--sound", "request"]]);
+});
