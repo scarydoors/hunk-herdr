@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { AGENT_KINDS } from "./config.ts";
+import { sessionIdForGeneration } from "./threads.ts";
 import { setTimeout as delay } from "node:timers/promises";
 
 export type Run = (binary: string, args: string[], cwd: string, timeout?: number) => Promise<string>;
@@ -45,27 +46,68 @@ export function workspaceAgents(agents: Pane[], caller: Pane): Pane[] {
 export function label(a: Pane): string {
   return `${a.name || a.agent} · ${a.agent_status || "unknown"} · ${a.pane_id} · ${a.foreground_cwd || a.cwd || ""}`;
 }
-export interface ThreadPromptScope {
-  title: string;
-  comments: readonly { id: string; body: string; filePath: string; side: "old" | "new"; line: number }[];
+/** One native review conversation a group prompt asks the agent to answer. */
+export interface PromptConversation {
+  /** The conversation's root comment: the one ID the agent replies to. */
+  readonly replyTo: string;
+  readonly filePath: string;
+  readonly side: "old" | "new";
+  readonly line: number;
+  /** Hunk reports the code at this line changed after the comment was written. */
+  readonly stale: boolean;
+  /** Root first, then its replies in the order they were saved. */
+  readonly messages: readonly { readonly from: string; readonly text: string }[];
 }
 
-export function buildPrompt(skill: string, cwd: string, text: string, selection: { file?: string; hunk?: number; thread?: ThreadPromptScope } = {}): string {
+export interface GroupPrompt {
+  /** Where `hunk skill path hunk-review` resolved the skill at submission time. */
+  readonly skill: string;
+  /** True when this agent was already told to read this exact skill file. */
+  readonly skillRead: boolean;
+  readonly sessionId: string;
+  readonly cwd: string;
+  readonly title: string;
+  readonly author: string;
+  readonly conversations: readonly PromptConversation[];
+  /** Typed text from the prompt field; it adds to the task rather than replacing it. */
+  readonly guidance?: string;
+}
+
+function indent(text: string): string {
+  return text.split(/\r?\n/).join("\n     ");
+}
+
+/**
+ * The prompt a group's agent receives. Command syntax is left to the Hunk skill,
+ * which updates with Hunk; this text holds only the task, its rules and data.
+ */
+export function buildPrompt(prompt: GroupPrompt): string {
+  const conversations = prompt.conversations.map((conversation, index) => [
+    `${index + 1}. reply to: ${conversation.replyTo} — ${conversation.filePath}, ${conversation.side} line ${conversation.line}`
+      + (conversation.stale ? " (stale: the code at this line has changed since it was written)" : ""),
+    ...conversation.messages.map(message => `   ${message.from}: ${indent(message.text)}`),
+  ].join("\n"));
   return [
-    "The user is prompting you from a live Hunk review in Herdr.",
-    "Before doing the task, run `hunk skill path` and read the returned file completely (the hunk-review skill).",
-    `Hunk resolved that skill here: ${JSON.stringify(skill)}.`,
-    `Review working directory: ${JSON.stringify(cwd)}. Your own cwd may differ.`,
-    "Use `hunk session list --json` to locate this review; use its exact session ID for subsequent commands. If multiple sessions match and you cannot identify this window, ask rather than guess.",
-    selection.thread ? [
-      `THREAD SCOPE (authoritative): ${JSON.stringify(selection.thread.title)}.`,
-      `Only review and act on these comments: ${JSON.stringify(selection.thread.comments)}.`,
-      "Do not reply to, create comments for, resolve, or otherwise act on any review comment outside this list. Ignore comments authored by other agents unless their id is explicitly listed. Reply only to relevant listed comments in their existing native Hunk threads with `hunk session comment add ... --reply-to <note-id>`; never add a detached root comment.",
-    ].join("\n") : "IMPORTANT: Read the review's user-authored comments and treat them as requests addressed to you. Reply to each relevant user comment in its existing thread with `hunk session comment add ... --reply-to <note-id>`; do not answer with detached root comments or leave relevant user comments unanswered.",
-    "Do not launch the Hunk TUI, restart its daemon, or change Herdr focus/zoom. Stay in the background unless the user asks otherwise.",
-    selection.file ? `Selection when the prompt was composed: ${JSON.stringify(selection.file)}${selection.hunk === undefined ? "" : `, hunk ${selection.hunk + 1}`}.` : "",
-    "\nUser request:", text,
-  ].filter(Boolean).join("\n");
+    "You're helping with a live Hunk code review from a background Herdr pane that nobody is watching. Don't wait for input here; anything you need to say goes in a review reply.",
+    prompt.skillRead
+      ? `You've already read the Hunk review skill at ${JSON.stringify(prompt.skill)}; read it again if it's no longer in your context.`
+      : `Before starting, read the Hunk review skill at ${JSON.stringify(prompt.skill)}; it documents the \`hunk session\` commands.`,
+    `Use session ${JSON.stringify(prompt.sessionId)} as the session selector for every \`hunk session\` command. Review working directory: ${JSON.stringify(prompt.cwd)}; your own cwd may differ.`,
+    "",
+    `Task: answer each review conversation listed below, from the group ${JSON.stringify(prompt.title)}, with a reply in that conversation.`,
+    "- Use each conversation's reply-to ID exactly as written; it is the only comment you may reply to in that conversation.",
+    "- Only the listed conversations are in scope. Don't reply to or start any other comment, and never resolve or delete a comment.",
+    "- Don't edit files unless the user's guidance below explicitly asks you to. Where a fix is warranted, describe it or include a short patch in the reply.",
+    "- If a comment is unclear, reply with a specific question and move on. If a reply fails because its comment no longer exists, skip it.",
+    "- Don't move the user's view, highlight code, reload the review, launch the Hunk TUI, restart the Hunk daemon, or change Herdr focus or zoom.",
+    `- Set the reply author to ${JSON.stringify(prompt.author)}.`,
+    "- Finish your turn once every listed conversation has a reply.",
+    "- Where the skill's general guidance conflicts with these rules, these rules win.",
+    "",
+    "Conversations (the complete list):",
+    ...conversations,
+    ...(prompt.guidance ? ["", "Additional guidance from the user:", prompt.guidance] : []),
+  ].join("\n");
 }
 
 export class Bridge {
@@ -142,7 +184,11 @@ export class Bridge {
   }
   /** The one call that runs `hunk` rather than `herdr`; kept here so every child process is mockable in one place. */
   async skillPath(): Promise<string> {
-    return this.exec("hunk", ["skill", "path"], this.cwd);
+    return this.exec("hunk", ["skill", "path", "hunk-review"], this.cwd);
+  }
+  /** The live Hunk session publishing this review generation. */
+  async sessionId(generation: string): Promise<string> {
+    return sessionIdForGeneration(this.exec, this.cwd, generation);
   }
   async reveal(target: Pane): Promise<void> {
     const agent = await this.validate(target);

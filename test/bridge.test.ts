@@ -152,28 +152,34 @@ test("cleanup refuses replaced agents and moved panes", async () => {
   }
 });
 
-test("payload includes skill discovery, full user text, cwd and selection", () => {
-  const text = "Explain this; don't edit it.\nThen check tests.";
-  const payload = buildPrompt("/nix/store/skill.md", "/review", text, { file: "src/main.ts", hunk: 2 });
-  assert.ok(payload.includes("`hunk skill path`"));
-  assert.ok(payload.includes("/nix/store/skill.md"));
-  assert.ok(payload.includes('"/review"'));
-  assert.ok(payload.includes("hunk 3"));
-  assert.ok(payload.includes("IMPORTANT: Read the review's user-authored comments"));
-  assert.ok(payload.includes("--reply-to <note-id>"));
-  assert.ok(payload.includes("do not answer with detached root comments"));
-  assert.ok(payload.endsWith(text));
+const conversation = {
+  replyTo: "user:one", filePath: "src/auth.ts", side: "new" as const, line: 12, stale: true,
+  messages: [{ from: "user", text: "Handle expiry\nand refresh" }, { from: "reviewer", text: "Which token?" }],
+};
+const groupPrompt = {
+  skill: "/nix/store/skill.md", skillRead: false, sessionId: "session:one", cwd: "/review",
+  title: "Authentication", author: "hunk-pi", conversations: [conversation],
+};
+
+test("group prompt carries the skill path, exact session and every reply-to ID, but no command syntax", () => {
+  const payload = buildPrompt(groupPrompt);
+  assert.match(payload, /Before starting, read the Hunk review skill at "\/nix\/store\/skill.md"/);
+  assert.doesNotMatch(payload, /hunk skill path|--reply-to|comment add|session list/, "command syntax is left to the skill");
+  assert.match(payload, /Use session "session:one" as the session selector/);
+  assert.match(payload, /Review working directory: "\/review"/);
+  assert.match(payload, /1\. reply to: user:one — src\/auth\.ts, new line 12 \(stale: the code at this line has changed since it was written\)\n   user: Handle expiry\n     and refresh\n   reviewer: Which token\?$/);
+  assert.match(payload, /never resolve or delete a comment/);
+  assert.match(payload, /Don't edit files unless the user's guidance below explicitly asks you to/);
+  assert.match(payload, /Set the reply author to "hunk-pi"/);
+  assert.match(payload, /these rules win/);
 });
 
-test("thread-scoped payload identifies the complete allowed comment set", () => {
-  const payload = buildPrompt("/skill.md", "/review", "Investigate", {
-    thread: {
-      title: "Authentication",
-      comments: [{ id: "user:one", body: "Handle expiry", filePath: "src/auth.ts", side: "new", line: 12 }],
-    },
-  });
-  assert.match(payload, /THREAD SCOPE \(authoritative\): "Authentication"/);
-  assert.match(payload, /"id":"user:one"/);
-  assert.match(payload, /Do not reply to, create comments for, resolve, or otherwise act on any review comment outside this list/);
-  assert.doesNotMatch(payload, /Read the review's user-authored comments and treat them as requests/);
+test("follow-ups skip re-reading the skill, and typed text is added as guidance", () => {
+  const text = "Explain this; don't edit it.\nThen check tests.";
+  const payload = buildPrompt({ ...groupPrompt, skillRead: true, guidance: text });
+  assert.match(payload, /You've already read the Hunk review skill at "\/nix\/store\/skill.md"/);
+  assert.doesNotMatch(payload, /Before starting, read/);
+  assert.ok(payload.endsWith(`Additional guidance from the user:\n${text}`));
+  assert.match(payload, /Task: answer each review conversation/, "guidance never replaces the task");
 });
+
