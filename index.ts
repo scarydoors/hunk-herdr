@@ -5,7 +5,7 @@ import { Bridge, buildPrompt, label, run, sameAgent, type Pane } from "./bridge.
 import { agentConfig, type AgentKind } from "./config.ts";
 import { modelOptions } from "./model-catalog.ts";
 import { isConfigurableAgentKind, loadModelDefaults, saveModelDefaults, type ConfigurableAgentKind, type ModelDefaults } from "./model-defaults.ts";
-import { removeThread, threadAtSelection, threadsForCommentIds } from "./threads.ts";
+import { conversationsForPrompt, removeThread, threadAtSelection, threadsForCommentIds } from "./threads.ts";
 import {
   ThreadsPane,
   activateSelectedThreadItem,
@@ -40,9 +40,6 @@ import {
 
 type Context = ExtensionCommandContext;
 
-/** What an empty prompt sends: the group's comments are the request. */
-export const DEFAULT_REQUEST = "Address every listed review comment and reply in its thread.";
-
 export default function register(hunk: HunkExtensionAPI) {
   hunk.registerPane({
     id: "threads",
@@ -72,7 +69,9 @@ export default function register(hunk: HunkExtensionAPI) {
 
   // `model` is only known for agents Herdr started itself; an agent we attached to
   // reports no model, so the prompt screen says so rather than guessing one.
-  type ThreadAgent = { pane?: Pane; bridge: Bridge; owned: boolean; ready: Promise<Pane>; model?: string };
+  // `skillRead` is the skill path this agent was last told to read. Hunk's path
+  // changes with every upgrade, so a new path means the agent reads it again.
+  type ThreadAgent = { pane?: Pane; bridge: Bridge; owned: boolean; ready: Promise<Pane>; model?: string; skillRead?: string };
   const threadAgents = new Map<string, ThreadAgent>();
   const dispatches = new Map<string, number>();
   const drafts = new Map<string, string>();
@@ -240,20 +239,32 @@ export default function register(hunk: HunkExtensionAPI) {
     const count = thread.comments.length;
     const text = await ctx.dialogs.input({
       title: `Prompt ${agentName(binding)} · ${modelHint(binding)} · ${thread.title}`,
-      placeholder: `Enter to address the ${count} listed comment${count === 1 ? "" : "s"}, or type extra instructions…`,
+      placeholder: `Enter to reply to the ${count} listed comment${count === 1 ? "" : "s"}, or add guidance…`,
       initial: drafts.get(thread.id) ?? "",
     });
-    // Esc cancels; an empty submission means the listed comments are the request.
+    // Esc cancels; typed text is guidance on top of replying to the listed comments.
     if (text === null || text === undefined || !alive(ctx)) return;
     const typed = text.trim() ? text : undefined;
     if (typed) drafts.set(thread.id, typed);
-    const skill = await binding.bridge.skillPath();
+    const review = ctx.review.snapshot();
+    if (!review) return;
+    const { conversations, skipped } = conversationsForPrompt(review, thread.comments.map(comment => comment.id));
+    if (!conversations.length) {
+      ctx.notify(`${thread.title}: none of its comments are still shown in the review. Nothing sent.`, "warning");
+      return;
+    }
+    const [skill, sessionId] = await Promise.all([
+      binding.bridge.skillPath(),
+      binding.bridge.sessionId(review.generation).catch((error: unknown) => {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}. Nothing sent.`);
+      }),
+    ]);
     if (!skill) throw new Error("hunk skill path returned no path. Nothing sent.");
     if (!alive(ctx)) return;
-    const payload = buildPrompt(skill, ctx.cwd, typed ?? DEFAULT_REQUEST, {
-      file: ctx.selection.file?.path,
-      hunk: ctx.selection.hunkIndex ?? undefined,
-      thread: { title: thread.title, comments: thread.comments },
+    // Built once the agent is ready, so a starting agent is named by its real pane.
+    const payload = (agent: Pane) => buildPrompt({
+      skill, skillRead: binding.skillRead === skill, sessionId, cwd: ctx.cwd,
+      title: thread.title, author: agent.name || agent.agent || "agent", conversations, guidance: typed,
     });
     badge(ctx, `sending ${thread.title}…`);
     // Herdr's waits are deliberately unbounded, and an agent that never reaches a
@@ -261,20 +272,23 @@ export default function register(hunk: HunkExtensionAPI) {
     // therefore hold the single-operation lock for the rest of the session, so the
     // turn is watched here instead: the group's own spinner reports it, and every
     // other command — resolving, stopping this agent — stays usable meanwhile.
-    watchDispatch(ctx, thread, binding, payload, typed);
-    ctx.notify(`Sent to ${agentName(binding)}: ${thread.title}.`);
+    watchDispatch(ctx, thread, binding, payload, typed, skill);
+    ctx.notify(`Sent to ${agentName(binding)}: ${thread.title}.${skipped.length ? ` Skipped ${skipped.length} comment${skipped.length === 1 ? "" : "s"} no longer shown in the review.` : ""}`);
   }
   function agentName(binding: ThreadAgent): string {
     return binding.pane?.name || binding.pane?.agent || "starting agent";
   }
   /** Follows one dispatched prompt to completion outside the command that sent it. */
-  function watchDispatch(ctx: Context, thread: ReviewThread, binding: ThreadAgent, payload: string, draft?: string): void {
+  function watchDispatch(ctx: Context, thread: ReviewThread, binding: ThreadAgent, payload: (agent: Pane) => string, draft: string | undefined, skill: string): void {
     const endSending = beginDispatch(thread.id);
     // The text is on its way: a second P during the turn starts from an empty prompt.
     drafts.delete(thread.id);
     void (async () => {
       try {
-        const settled = await binding.bridge.promptWhenReady(await readyAgent(binding), payload);
+        const agent = await readyAgent(binding);
+        const settled = await binding.bridge.promptWhenReady(agent, payload(agent));
+        // Only a delivered prompt counts; after an uncertain hand-off the next one asks again.
+        binding.skillRead = skill;
         if (["idle", "done"].includes(settled.agent_status || "")) setThreadCompleted(thread.id);
         if (alive(ctx)) ctx.notify(`Agent completed the prompt for thread: ${thread.title}.`);
       } catch (error) {

@@ -11,7 +11,7 @@ Open Hunk in a Herdr pane, then:
 The happy path is **save a comment → Ctrl+T → P → Enter → Enter**: the comment
 joins a group on its own, Ctrl+T focuses the Threads sidebar on the comment you just
 saved, P acts on that comment's group, the first picker row starts the default agent,
-and an empty prompt tells it to address the group's comments.
+and an empty prompt asks it to reply to the group's comments.
 
 The sidebar is the cursor for comments. Hunk never tells an extension which note its
 own review cursor is on, but it will reveal any line exactly, so the relationship runs
@@ -71,14 +71,13 @@ naming its saved model; below it are the eligible running agents in the current
 workspace (and matching worktree cwd when available), then **Start another kind…**
 when more kinds are configured. Agents started by this extension are labeled with
 their assigned group when shown in a later picker. The prompt field then opens with a
-placeholder: pressing Enter on an empty field sends
-"Address every listed review comment and reply in its thread."; typed text is sent
-instead. A spinning indicator on a group means Herdr is starting its agent or
+placeholder: pressing Enter on an empty field asks the agent to reply to each of the
+group's comments; typed text is sent as additional guidance on top of that task. A spinning indicator on a group means Herdr is starting its agent or
 sending it work; after Herdr observes its response, the indicator becomes a green
 checkmark. When creating an agent for **P**, the prompt field opens while it starts,
 and both delivery and the agent's turn are followed in the background, so every other
-command stays usable while a group is working. Each prompt includes an authoritative list of that group's comment
-IDs and explicitly prohibits acting on any other review comments. Press **Ctrl+R** on
+command stays usable while a group is working. Each prompt lists the group's conversations, each with the one
+comment ID to reply to, and rules out acting on any other review comment. Press **Ctrl+R** on
 a thread heading to move the whole displayed group, or on a comment to move only
 that comment, into **Unassigned**, another thread, or a new named thread. With a
 Threads group selected, **X** confirms resolving that displayed group and all its
@@ -129,20 +128,29 @@ or moved/changed pane may leave it running. Use Herdr to manage any leftover
 
 ## Prompting
 
-The prompt sent through `herdr agent prompt` includes:
+The prompt sent through `herdr agent prompt` holds the task, its rules and data;
+command syntax is left to Hunk's own review skill, which updates with Hunk:
 
-- Instructions to run **`hunk skill path` and read the returned review skill**.
-- The path resolved by Hunk at submission time.
-- Review cwd and the selected file/hunk at composition time.
-- An explicit instruction to read user-authored review comments and answer relevant
-  ones as replies in their existing threads, not as detached root comments.
-- Your request, unchanged.
+- The path of the **hunk-review skill**, resolved with `hunk skill path hunk-review`
+  at submission time. An agent's first prompt asks it to read the skill; follow-ups
+  say it has already been read. Upgrading Hunk changes the path, so the next prompt
+  asks again, as does any prompt after an uncertain hand-off.
+- The exact live **session ID**, matched to this review by the extension, so the
+  agent never has to choose between sessions. If it can't be identified, nothing is sent.
+- Every **conversation** in the group, taken from the review at submission time:
+  the root comment's ID to reply to, its file and line, a stale mark when Hunk reports
+  the code there changed, then the root and its replies in order. Comments Hunk no
+  longer renders are skipped, and the notice says how many.
+- The rules: reply only in the listed conversations; never resolve, delete or start
+  comments; don't edit files unless your guidance asks; ask a question in the thread
+  when a comment is unclear rather than waiting in the hidden pane; don't move your
+  view, highlight, reload or restart the daemon; sign replies with the agent's name.
+  Where the skill's general guidance disagrees, these rules win.
+- Your typed text, under **Additional guidance**, when you entered any.
 
-Agents are instructed to discover the matching live Hunk session and use its exact
-ID. Multiple indistinguishable sessions require clarification rather than guessing.
-No patch or saved notes are exported automatically. The agent can inspect the live
-review using the Hunk skill. The extension doesn't restrict the agent's normal
-permissions: ask for read-only work if that's what you want.
+No patch is exported: the agent reads the code and diff itself using the skill. The
+extension doesn't restrict the agent's normal permissions; the no-edits rule is an
+instruction, not a sandbox.
 
 Only `idle`/`done` agents receive prompts. Identity and workspace are revalidated
 before submission. Sending notifies immediately; a second notification reports the

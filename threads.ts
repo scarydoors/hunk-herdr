@@ -3,7 +3,7 @@ import type {
   ExtensionReviewSnapshot,
   ExtensionReviewSnapshotNote,
 } from "hunkdiff/extension";
-import type { Run } from "./bridge.ts";
+import type { PromptConversation, Run } from "./bridge.ts";
 
 export type ThreadMatch =
   | { kind: "found"; root: ExtensionReviewSnapshotNote; notes: readonly ExtensionReviewSnapshotNote[] }
@@ -131,7 +131,6 @@ type SessionList = {
   sessions?: Array<{ sessionId?: string; snapshot?: { state?: { reviewPublication?: { generation?: string } } } }>;
 };
 
-/** Remove descendants before their parents so Hunk never leaves dangling replies. */
 /** Returns every active native thread that contains any requested comment ID. */
 export function threadsForCommentIds(snapshot: ExtensionReviewSnapshot, commentIds: ReadonlySet<string>): readonly ExtensionReviewSnapshotNote[] {
   const active = snapshot.notes.filter(note => note.resolution === "active");
@@ -148,15 +147,58 @@ export function threadsForCommentIds(snapshot: ExtensionReviewSnapshot, commentI
     .sort((left, right) => depth(right, byId) - depth(left, byId));
 }
 
-export async function removeThread(run: Run, cwd: string, generation: string, notes: readonly ExtensionReviewSnapshotNote[]): Promise<void> {
+/** The one live Hunk session publishing this review generation; anything else is refused. */
+export async function sessionIdForGeneration(run: Run, cwd: string, generation: string): Promise<string> {
   const listed = JSON.parse(await run("hunk", ["session", "list", "--json"], cwd)) as SessionList;
   const matches = (listed.sessions ?? []).filter(session => session.snapshot?.state?.reviewPublication?.generation === generation);
   if (matches.length !== 1 || !matches[0]!.sessionId) {
     throw new Error(matches.length > 1
-      ? "Multiple Hunk sessions matched this review; nothing was resolved."
-      : "The live Hunk session could not be identified; nothing was resolved.");
+      ? "Multiple Hunk sessions matched this review"
+      : "The live Hunk session could not be identified");
+  }
+  return matches[0]!.sessionId;
+}
+
+export async function removeThread(run: Run, cwd: string, generation: string, notes: readonly ExtensionReviewSnapshotNote[]): Promise<void> {
+  let sessionId: string;
+  try {
+    sessionId = await sessionIdForGeneration(run, cwd, generation);
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; nothing was resolved.`);
   }
   for (const note of notes) {
-    await run("hunk", ["session", "comment", "rm", matches[0]!.sessionId!, note.id, "--json"], cwd);
+    await run("hunk", ["session", "comment", "rm", sessionId, note.id, "--json"], cwd);
   }
+}
+
+/**
+ * Each requested root comment's conversation as the agent should read it: the
+ * root, then its replies in saved order. Roots Hunk no longer renders, or no
+ * longer holds, are returned as skipped rather than sent.
+ */
+export function conversationsForPrompt(snapshot: ExtensionReviewSnapshot, rootIds: readonly string[]): { conversations: PromptConversation[]; skipped: string[] } {
+  const byId = new Map(snapshot.notes.map(note => [note.id, note]));
+  const paths = new Map(snapshot.files.map(file => [file.fileKey, file.path]));
+  const conversations: PromptConversation[] = [];
+  const skipped: string[] = [];
+  for (const id of rootIds) {
+    const root = byId.get(id);
+    const at = root && (root.anchor.preferred
+      ?? (root.anchor.newRange ? { side: "new" as const, line: root.anchor.newRange[0] } : undefined)
+      ?? (root.anchor.oldRange ? { side: "old" as const, line: root.anchor.oldRange[0] } : undefined));
+    if (!root || root.resolution === "orphaned" || !at) { skipped.push(id); continue; }
+    const notes = snapshot.notes.filter(note => note.resolution !== "orphaned" && rootId(note, byId) === root.id);
+    conversations.push({
+      replyTo: root.id,
+      filePath: paths.get(root.fileKey) ?? root.fileKey,
+      side: at.side,
+      line: at.line,
+      stale: root.resolution === "stale",
+      messages: notes.map(note => ({
+        from: note.source === "user" ? "user" : note.author || "agent",
+        text: [note.summary, note.rationale].filter(Boolean).join("\n"),
+      })),
+    });
+  }
+  return { conversations, skipped };
 }

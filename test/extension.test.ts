@@ -6,7 +6,6 @@ import type { ExtensionKeyEvent, ExtensionCommandContext, ExtensionKeyboardMode,
 
 type KeyboardMode = { id: string; onKey: ExtensionKeyboardMode["onKey"]; onEnter?: () => void; onExit?: () => void };
 import { createThread, resetThreadBoard, selectedThreadItem, threadBoardSnapshot } from "../threads-pane.tsx";
-import { DEFAULT_REQUEST } from "../index.ts";
 
 const caller: Pane = { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", terminal_id: "caller" };
 const agent: Pane = { ...caller, pane_id: "w1:p2", terminal_id: "agent", agent: "pi", agent_status: "idle" };
@@ -270,6 +269,7 @@ test("retires an emptied group without ever closing an agent the user picked", a
   t.mock.method(Bridge.prototype, "validate", async () => agent);
   const stop = t.mock.method(Bridge.prototype, "stop", async () => {});
   const h = host();
+  h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }]);
   h.focus();
   h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
   await h.invoke("pick");
@@ -305,10 +305,12 @@ test("releases the command lock while the agent's turn is still running", async 
   t.mock.method(Bridge.prototype, "agents", async () => [agent]);
   t.mock.method(Bridge.prototype, "validate", async () => agent);
   t.mock.method(Bridge.prototype, "skillPath", async () => "/skills/hunk-review.md");
+  t.mock.method(Bridge.prototype, "sessionId", async () => "session:one");
   // A Herdr wait that never returns is exactly the case that used to strand the lock.
   let settle!: (pane: Pane) => void;
   t.mock.method(Bridge.prototype, "promptWhenReady", () => new Promise<Pane>(resolve => { settle = resolve; }));
   const h = host();
+  h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }]);
   h.focus();
   h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
   h.inputs.push("Explain this expiry path");
@@ -359,6 +361,7 @@ test("names the model on the prompt screen, and says so when the agent was not s
   t.mock.method(Bridge.prototype, "agents", async () => [agent]);
   t.mock.method(Bridge.prototype, "validate", async () => agent);
   const h = host();
+  h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }]);
   h.focus();
   h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
   h.inputs.push(null); // Cancel before the prompt reaches the local hunk executable.
@@ -486,23 +489,32 @@ test("reload during discovery cancels stale UI work", async t => {
   assert.equal(h.options.length, 0);
 });
 
-test("an empty prompt sends the default request and clears the draft on hand-off", async t => {
+test("an empty prompt asks for replies to the group's conversations and clears the draft on hand-off", async t => {
   resetThreadBoard();
   createThread("Authentication", authNote);
   t.mock.method(Bridge.prototype, "caller", async () => caller);
   t.mock.method(Bridge.prototype, "agents", async () => [agent]);
   t.mock.method(Bridge.prototype, "validate", async () => agent);
   t.mock.method(Bridge.prototype, "skillPath", async () => "/skills/hunk-review.md");
+  t.mock.method(Bridge.prototype, "sessionId", async () => "session:one");
   const payloads: string[] = [];
   let settle!: (pane: Pane) => void;
   t.mock.method(Bridge.prototype, "promptWhenReady", (_pane: Pane, text: string) => { payloads.push(text); return new Promise<Pane>(resolve => { settle = resolve; }); });
   const h = host();
+  const review = reviewAt([{ id: "user:one", line: 12 }, { id: "user:other", line: 30 }]);
+  h.state.snapshot = { ...review, notes: [...review.notes, { ...review.notes[0]!, id: "agent:reply", parentId: "user:one", source: "agent", author: "reviewer", summary: "Which token?" }] };
   h.focus();
   h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
   h.inputs.push("   ");
   await h.invoke("prompt");
+  await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(payloads.length, 1);
-  assert.ok(payloads[0]!.endsWith(`User request:\n${DEFAULT_REQUEST}`));
+  const payload = payloads[0]!;
+  assert.match(payload, /Before starting, read the Hunk review skill at "\/skills\/hunk-review.md"/);
+  assert.match(payload, /Use session "session:one" as the session selector/);
+  assert.match(payload, /1\. reply to: user:one — src\/auth\.ts, new line 12\n   user: Comment user:one\n   reviewer: Which token\?$/);
+  assert.doesNotMatch(payload, /user:other/, "comments outside the group are never sent");
+  assert.doesNotMatch(payload, /Additional guidance/);
 
   // While the turn is still running, P again starts from an empty prompt.
   h.inputs.push(null);
@@ -510,6 +522,32 @@ test("an empty prompt sends the default request and clears the draft on hand-off
   assert.equal(h.inputInitials.at(-1), "");
   settle({ ...agent, agent_status: "idle" });
   await new Promise<void>(resolve => setImmediate(resolve));
+
+  // A follow-up after delivery doesn't ask for the same skill file again.
+  h.inputs.push("Also check the refresh path");
+  await h.invoke("prompt");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.match(payloads[1]!, /You've already read the Hunk review skill at "\/skills\/hunk-review.md"/);
+  assert.match(payloads[1]!, /Additional guidance from the user:\nAlso check the refresh path$/);
+  settle({ ...agent, agent_status: "idle" });
+  await new Promise<void>(resolve => setImmediate(resolve));
+});
+
+test("P sends nothing when none of the group's comments are still in the review", async t => {
+  resetThreadBoard();
+  createThread("Authentication", authNote);
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => [agent]);
+  t.mock.method(Bridge.prototype, "validate", async () => agent);
+  const sent = t.mock.method(Bridge.prototype, "promptWhenReady", async () => agent);
+  const h = host();
+  h.state.snapshot = reviewAt([]);
+  h.focus();
+  h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
+  h.inputs.push("");
+  await h.invoke("prompt");
+  assert.equal(sent.mock.callCount(), 0);
+  assert.match(h.notices.at(-1)!, /none of its comments are still shown in the review\. Nothing sent\./);
 });
 
 test("a failed hand-off keeps the typed request as the draft", async t => {
@@ -519,8 +557,10 @@ test("a failed hand-off keeps the typed request as the draft", async t => {
   t.mock.method(Bridge.prototype, "agents", async () => [agent]);
   t.mock.method(Bridge.prototype, "validate", async () => agent);
   t.mock.method(Bridge.prototype, "skillPath", async () => "/skills/hunk-review.md");
+  t.mock.method(Bridge.prototype, "sessionId", async () => "session:one");
   t.mock.method(Bridge.prototype, "promptWhenReady", async () => { throw new Error("Agent is busy"); });
   const h = host();
+  h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }]);
   h.focus();
   h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
   h.inputs.push("Explain the expiry path");
