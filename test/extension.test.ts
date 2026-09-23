@@ -309,6 +309,7 @@ test("releases the command lock while the agent's turn is still running", async 
   // A Herdr wait that never returns is exactly the case that used to strand the lock.
   let settle!: (pane: Pane) => void;
   t.mock.method(Bridge.prototype, "promptWhenReady", () => new Promise<Pane>(resolve => { settle = resolve; }));
+  const herdrNotices = t.mock.method(Bridge.prototype, "notify", async () => {});
   const h = host();
   h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }]);
   h.focus();
@@ -329,6 +330,73 @@ test("releases the command lock while the agent's turn is still running", async 
   assert.equal(threadBoardSnapshot().threads[0]?.dispatching, false);
   assert.equal(threadBoardSnapshot().threads[0]?.completed, true);
   assert.match(h.notices.at(-1)!, /Agent completed the prompt for thread: Authentication/);
+  assert.equal(herdrNotices.mock.calls.at(-1)?.arguments[2], "done");
+});
+
+test("notifications = \"herdr\" announces a finished turn only through Herdr", async t => {
+  resetThreadBoard();
+  createThread("Authentication", {
+    id: "user:one", fileId: "runtime:one", filePath: "src/auth.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expiry", draft: false,
+  });
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => [agent]);
+  t.mock.method(Bridge.prototype, "validate", async () => agent);
+  t.mock.method(Bridge.prototype, "skillPath", async () => "/skills/hunk-review.md");
+  t.mock.method(Bridge.prototype, "sessionId", async () => "session:one");
+  t.mock.method(Bridge.prototype, "promptWhenReady", async () => ({ ...agent, agent_status: "done" }));
+  const herdrNotices = t.mock.method(Bridge.prototype, "notify", async () => {});
+  const h = host({ notifications: "herdr" });
+  h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }]);
+  h.focus();
+  h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
+  h.inputs.push("");
+  await h.invoke("prompt");
+  await new Promise<void>(resolve => setImmediate(resolve));
+
+  assert.equal(herdrNotices.mock.callCount(), 1);
+  assert.ok(!h.notices.some(notice => notice.startsWith("Agent completed")));
+});
+
+test("marks a group whose agent ends its turn blocked until the agent is revealed", async t => {
+  resetThreadBoard();
+  createThread("Authentication", {
+    id: "user:one", fileId: "runtime:one", filePath: "src/auth.ts", hunkIndex: 0,
+    side: "new", line: 12, body: "Handle expiry", draft: false,
+  });
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => [agent]);
+  t.mock.method(Bridge.prototype, "validate", async () => agent);
+  t.mock.method(Bridge.prototype, "skillPath", async () => "/skills/hunk-review.md");
+  t.mock.method(Bridge.prototype, "sessionId", async () => "session:one");
+  t.mock.method(Bridge.prototype, "promptWhenReady", async () => ({ ...agent, agent_status: "blocked" }));
+  const revealed = t.mock.method(Bridge.prototype, "reveal", async () => {});
+  const herdrNotices = t.mock.method(Bridge.prototype, "notify", async () => {});
+  const h = host();
+  h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }]);
+  h.focus();
+  h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
+  h.inputs.push("");
+  await h.invoke("prompt");
+  await new Promise<void>(resolve => setImmediate(resolve));
+
+  assert.equal(threadBoardSnapshot().threads[0]?.attention, "blocked");
+  assert.equal(threadBoardSnapshot().threads[0]?.completed, false);
+  assert.deepEqual(threadBoardSnapshot().threads[0]?.agent, { label: "pi", owned: false });
+
+  // The agent's answer reaches the comment's row through Hunk's note_changed.
+  await h.emit("note_changed", { kind: "created", note: {
+    id: "agent:1", parentId: "user:one", source: "agent", fileKey: "file:one", summary: "On it", editable: false,
+    resolution: "active", anchor: { newRange: [12, 12], preferred: { side: "new", line: 12 }, intersectingHunkIndices: [0] },
+  } });
+  assert.deepEqual(threadBoardSnapshot().threads[0]?.comments[0]?.replyIds, ["agent:1"]);
+  assert.match(h.notices.at(-1)!, /Authentication needs attention: agent is blocked\. A → Reveal/);
+  assert.deepEqual(herdrNotices.mock.calls.at(-1)?.arguments.slice(0, 1), ["Hunk · pi"]);
+  assert.equal(herdrNotices.mock.calls.at(-1)?.arguments[2], "request");
+
+  await h.invoke("reveal");
+  assert.equal(revealed.mock.callCount(), 1);
+  assert.equal(threadBoardSnapshot().threads[0]?.attention, undefined);
 });
 
 test("cancelled picker never spawns or prompts", async t => {

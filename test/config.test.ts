@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agentConfig, AGENT_KINDS } from "../config.ts";
+import { agentConfig, AGENT_KINDS, notificationTarget } from "../config.ts";
 
 test("defaults preserve all supported agents and no preferred type", () => {
   assert.deepEqual(agentConfig(), { agents: [...AGENT_KINDS], defaultAgent: undefined });
@@ -19,4 +19,10 @@ test("reject invalid types and defaults instead of launching arbitrary commands"
     { default_agent: "sh" }, { default_agent: 1 },
     { agents: ["pi"], default_agent: "claude" }, { agents: [], default_agent: "pi" },
   ]) assert.throws(() => agentConfig(config), /hunk-herdr:/);
+});
+
+test("notifications defaults to both and rejects unknown targets", () => {
+  assert.equal(notificationTarget(), "both");
+  assert.equal(notificationTarget({ notifications: "hunk" }), "hunk");
+  assert.throws(() => notificationTarget({ notifications: "slack" }), /notifications must be one of: both, hunk, herdr/);
 });

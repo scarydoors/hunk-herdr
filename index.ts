@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { matchesKey } from "hunkdiff/extension";
 import type { ExtensionCommandContext, ExtensionEventContext, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
 import { Bridge, buildPrompt, label, run, sameAgent, type Pane } from "./bridge.ts";
-import { agentConfig, type AgentKind } from "./config.ts";
+import { agentConfig, notificationTarget, type AgentKind } from "./config.ts";
 import { modelOptions } from "./model-catalog.ts";
 import { isConfigurableAgentKind, loadModelDefaults, saveModelDefaults, type ConfigurableAgentKind, type ModelDefaults } from "./model-defaults.ts";
 import { conversationsForPrompt, removeThread, threadAtSelection, threadsForCommentIds } from "./threads.ts";
@@ -31,6 +31,9 @@ import {
   startThreadNavigation,
   stopThreadNavigation,
   syncCommentsWithReview,
+  recordReviewNote,
+  setThreadAgent,
+  setThreadAttention,
   setThreadCompleted,
   setThreadDispatching,
   updateThreadCommentNavigation,
@@ -137,6 +140,12 @@ export default function register(hunk: HunkExtensionAPI) {
   function threadAgent(thread: ReviewThread): ThreadAgent | undefined {
     return threadAgents.get(thread.id);
   }
+  /** Binds or unbinds a group's agent, mirroring it onto the group's row. */
+  function bindAgent(threadId: string, binding: ThreadAgent | undefined, label?: string): void {
+    if (binding) threadAgents.set(threadId, binding);
+    else threadAgents.delete(threadId);
+    setThreadAgent(threadId, binding && { label: label ?? agentName(binding), owned: binding.owned });
+  }
   function beginDispatch(threadId: string): () => void {
     dispatches.set(threadId, (dispatches.get(threadId) ?? 0) + 1);
     setThreadDispatching(threadId, true);
@@ -169,8 +178,6 @@ export default function register(hunk: HunkExtensionAPI) {
   function alive(ctx: Context): boolean {
     return !disposed && ctx.review.snapshot() !== null;
   }
-  // Agent state is shown in the Threads pane and dialogs, not a persistent status row.
-  function badge(_ctx: Context, _message?: string) {}
   async function choose(ctx: Context, thread = selectedGroup(ctx), waitForReady = true): Promise<ThreadAgent | undefined> {
     if (!thread) return undefined;
     if (threadAgent(thread)?.owned) {
@@ -211,14 +218,17 @@ export default function register(hunk: HunkExtensionAPI) {
       const layout = await api.layout(caller);
       if (!alive(ctx)) return;
       originallyZoomed ??= layout.zoomed;
-      badge(ctx, `starting ${kind} for ${thread.title}…`);
       const endStarting = beginDispatch(thread.id);
       const model = isConfigurableAgentKind(kind) ? modelDefaults[kind] : undefined;
       const ready = api.spawn(kind, model).finally(endStarting);
-      // Attach a handler now: the user may cancel the prompt before startup finishes.
-      void ready.catch(() => {});
-      binding = { bridge: api, owned: true, ready, model };
-      threadAgents.set(thread.id, binding);
+      // Attach a handler now: the user may cancel the prompt before startup finishes,
+      // so a failed start is marked on the group even when no prompt follows it.
+      void ready.catch(() => setThreadAttention(thread.id, "startup failed"));
+      const starting: ThreadAgent = { bridge: api, owned: true, ready, model };
+      binding = starting;
+      // Named by kind while it starts, then by the pane Herdr gave it.
+      bindAgent(thread.id, starting, kind);
+      void ready.then(pane => { if (threadAgents.get(thread.id) === starting) bindAgent(thread.id, starting, pane.name || pane.agent || kind); }, () => {});
       if (waitForReady) {
         await readyAgent(binding);
         if (alive(ctx)) ctx.notify(`Temporary agent ready for ${thread.title}. Hunk stays zoomed; use Reveal to see it.`);
@@ -226,9 +236,8 @@ export default function register(hunk: HunkExtensionAPI) {
     } else {
       const pane = await api.validate(agents[options.indexOf(picked)]!);
       binding = { pane, bridge: api, owned: false, ready: Promise.resolve(pane) };
-      threadAgents.set(thread.id, binding);
+      bindAgent(thread.id, binding);
     }
-    if (alive(ctx)) badge(ctx);
     return binding;
   }
   async function prompt(ctx: Context): Promise<void> {
@@ -266,7 +275,6 @@ export default function register(hunk: HunkExtensionAPI) {
       skill, skillRead: binding.skillRead === skill, sessionId, cwd: ctx.cwd,
       title: thread.title, author: agent.name || agent.agent || "agent", conversations, guidance: typed,
     });
-    badge(ctx, `sending ${thread.title}…`);
     // Herdr's waits are deliberately unbounded, and an agent that never reaches a
     // matched state never ends them. Watching the turn from inside the command would
     // therefore hold the single-operation lock for the rest of the session, so the
@@ -277,6 +285,16 @@ export default function register(hunk: HunkExtensionAPI) {
   }
   function agentName(binding: ThreadAgent): string {
     return binding.pane?.name || binding.pane?.agent || "starting agent";
+  }
+  /**
+   * Reports the end of a group's turn. The Hunk toast only reaches someone looking at
+   * Hunk; Herdr's notification reaches them wherever they are in the session.
+   */
+  function announce(ctx: Context, binding: ThreadAgent, outcome: "done" | "attention", message: string): void {
+    if (!alive(ctx)) return;
+    const target = notificationTarget(hunk.config);
+    if (target !== "herdr") ctx.notify(message, outcome === "done" ? "info" : "warning");
+    if (target !== "hunk") void binding.bridge.notify(`Hunk · ${agentName(binding)}`, message, outcome === "done" ? "done" : "request");
   }
   /** Follows one dispatched prompt to completion outside the command that sent it. */
   function watchDispatch(ctx: Context, thread: ReviewThread, binding: ThreadAgent, payload: (agent: Pane) => string, draft: string | undefined, skill: string): void {
@@ -289,12 +307,19 @@ export default function register(hunk: HunkExtensionAPI) {
         const settled = await binding.bridge.promptWhenReady(agent, payload(agent));
         // Only a delivered prompt counts; after an uncertain hand-off the next one asks again.
         binding.skillRead = skill;
-        if (["idle", "done"].includes(settled.agent_status || "")) setThreadCompleted(thread.id);
-        if (alive(ctx)) ctx.notify(`Agent completed the prompt for thread: ${thread.title}.`);
+        if (["idle", "done"].includes(settled.agent_status || "")) {
+          setThreadCompleted(thread.id);
+          announce(ctx, binding, "done", `Agent completed the prompt for thread: ${thread.title}.`);
+        } else {
+          // Blocked on a trust, login or permission prompt in a pane nobody can see.
+          setThreadAttention(thread.id, settled.agent_status || "unknown");
+          announce(ctx, binding, "attention", `${thread.title} needs attention: agent is ${settled.agent_status || "unknown"}. A → Reveal to see it.`);
+        }
       } catch (error) {
         // A failed hand-off keeps the typed request available for the retry.
         if (draft && !drafts.has(thread.id)) drafts.set(thread.id, draft);
-        if (alive(ctx)) ctx.notify(`${thread.title}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+        setThreadAttention(thread.id, "failed");
+        announce(ctx, binding, "attention", `${thread.title} needs attention: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
         endSending();
       }
@@ -305,13 +330,15 @@ export default function register(hunk: HunkExtensionAPI) {
     const binding = thread && threadAgent(thread);
     if (!thread || !binding) { await choose(ctx, thread); return; }
     binding.pane = await binding.bridge.validate(await readyAgent(binding));
-    if (alive(ctx)) { badge(ctx); ctx.notify(agentLabel(binding.pane)); }
+    if (alive(ctx)) ctx.notify(agentLabel(binding.pane));
   }
   async function reveal(ctx: Context): Promise<void> {
     const thread = selectedGroup(ctx);
     const binding = thread && threadAgent(thread);
     if (!thread || !binding) { await choose(ctx, thread); return; }
     await binding.bridge.reveal(await readyAgent(binding));
+    // Seeing the agent is how a blocked one gets unblocked.
+    setThreadAttention(thread.id, undefined);
   }
   async function stop(ctx: Context): Promise<void> {
     const thread = selectedGroup(ctx);
@@ -322,8 +349,8 @@ export default function register(hunk: HunkExtensionAPI) {
       confirmLabel: "Stop agent", cancelLabel: "Leave running",
     }) || !alive(ctx)) return;
     await binding.bridge.stop();
-    threadAgents.delete(thread.id);
-    badge(ctx);
+    bindAgent(thread.id, undefined);
+    setThreadAttention(thread.id, undefined);
     ctx.notify(`Temporary agent stopped for ${thread.title}.`);
   }
   /**
@@ -525,7 +552,6 @@ export default function register(hunk: HunkExtensionAPI) {
         }
         catch (error) {
           if (alive(ctx)) {
-            badge(ctx, "needs attention");
             ctx.notify(error instanceof Error ? error.message : String(error), "warning");
           }
         }
@@ -588,6 +614,7 @@ export default function register(hunk: HunkExtensionAPI) {
     if (!note.draft) updateAssignedComment(note);
   });
   hunk.on("note_changed", async ({ kind, note }, ctx) => {
+    recordReviewNote(kind, note);
     if (kind !== "removed") {
       updateThreadCommentNavigation(note.id, note.anchor);
       return;

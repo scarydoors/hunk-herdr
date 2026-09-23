@@ -3,16 +3,22 @@ import assert from "node:assert/strict";
 import type { ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
 import {
   assignComment,
+  commentRowText,
   createThread,
   createThreadFromComment,
   createThreadFromGroup,
   moveComment,
   moveThreadComments,
   moveThreadSelection,
+  groupRowText,
+  markRepliesRead,
   nearestThreadForNote,
+  recordReviewNote,
   removeAssignedComment,
   resetThreadBoard,
   selectedThreadItem,
+  setThreadAgent,
+  setThreadAttention,
   setThreadCompleted,
   setThreadDispatching,
   startThreadNavigation,
@@ -125,6 +131,24 @@ test("marks a group as dispatching while Herdr starts or sends its agent", () =>
   assert.equal(threadBoardSnapshot().threads[0]?.completed, false);
 });
 
+test("keeps a group's attention mark until it is cleared or the group is prompted again", () => {
+  resetThreadBoard();
+  const created = createThread("Authentication", note("one", "Check auth handling"));
+  setThreadCompleted(created.id);
+  setThreadAttention(created.id, "blocked");
+  assert.deepEqual(threadBoardSnapshot().threads[0] && {
+    attention: threadBoardSnapshot().threads[0].attention,
+    completed: threadBoardSnapshot().threads[0].completed,
+  }, { attention: "blocked", completed: false });
+  setThreadDispatching(created.id, false);
+  assert.equal(threadBoardSnapshot().threads[0]?.attention, "blocked");
+  setThreadDispatching(created.id, true);
+  assert.equal(threadBoardSnapshot().threads[0]?.attention, undefined);
+  setThreadAttention(created.id, "failed");
+  setThreadAttention(created.id, undefined);
+  assert.equal(threadBoardSnapshot().threads[0]?.attention, undefined);
+});
+
 test("updates and removes assigned comments without deleting the thread", () => {
   resetThreadBoard();
   const created = createThread("Tests", note("one", "Original"));
@@ -199,4 +223,72 @@ test("a review snapshot refreshes anchors and marks comments Hunk calls stale or
   const before = threadBoardSnapshot();
   syncCommentsWithReview(null);
   assert.equal(threadBoardSnapshot(), before);
+});
+
+const reply = (id: string, parentId: string, source: "agent" | "user" = "agent"): ExtensionReviewSnapshot["notes"][number] => ({
+  id, parentId, source, fileKey: "file:one", summary: id, editable: false, resolution: "active",
+  anchor: { newRange: [12, 12], preferred: { side: "new", line: 12 }, intersectingHunkIndices: [0], ownerHunkIndex: 0 },
+});
+const replies = () => threadBoardSnapshot().threads[0]?.comments.map(comment => [comment.id, comment.replyIds ?? [], comment.unreadReplyIds ?? []]);
+
+test("counts agent replies through nested parents and leaves them unread until the comment is selected", () => {
+  resetThreadBoard();
+  createThread("Authentication", note("one", "Check auth handling"));
+  recordReviewNote("created", reply("agent:1", "one"));
+  recordReviewNote("created", reply("user:2", "agent:1", "user"));   // the user's own follow-up is not news
+  recordReviewNote("created", reply("agent:3", "agent:1"));          // nested under an agent reply
+  recordReviewNote("updated", reply("agent:1", "one"));              // an edit is not a second reply
+  assert.deepEqual(replies(), [["one", ["agent:1", "agent:3"], ["agent:1", "agent:3"]]]);
+
+  markRepliesRead("one");
+  assert.deepEqual(replies(), [["one", ["agent:1", "agent:3"], []]]);
+  recordReviewNote("removed", reply("agent:3", "agent:1"));
+  assert.deepEqual(replies(), [["one", ["agent:1"], []]]);
+});
+
+test("a reply arriving while its comment is selected in Threads is already read", () => {
+  resetThreadBoard();
+  createThread("Authentication", note("one", "Check auth handling"));
+  startThreadNavigation(); // lands on the comment saved last
+  assert.equal(selectedThreadItem()?.kind, "comment");
+  recordReviewNote("created", reply("agent:1", "one"));
+  assert.deepEqual(replies(), [["one", ["agent:1"], []]]);
+  stopThreadNavigation();
+});
+
+test("a review snapshot rebuilds replies, including ones under notes no event placed", () => {
+  resetThreadBoard();
+  createThread("Authentication", note("one", "Check auth handling"));
+  recordReviewNote("created", reply("agent:gone", "one"));
+  markRepliesRead("one");
+  const root: ExtensionReviewSnapshot["notes"][number] = { ...reply("one", "x", "user"), parentId: undefined };
+  syncCommentsWithReview({
+    generation: "g", stateRevision: 3, files: [],
+    // agent:deep hangs off a user reply the board never tracked; agent:gone was dropped by a reload.
+    notes: [root, reply("user:mid", "one", "user"), reply("agent:deep", "user:mid")],
+  });
+  assert.deepEqual(replies(), [["one", ["agent:deep"], ["agent:deep"]]]);
+  // Moving or editing the comment keeps its conversation.
+  updateAssignedComment(note("one", "Check auth handling, edited"));
+  assert.deepEqual(replies(), [["one", ["agent:deep"], ["agent:deep"]]]);
+});
+
+test("rows name the group's agent and a comment's replies, dropping suffixes before the text", () => {
+  resetThreadBoard();
+  const created = createThread("Authentication", note("one", "Handle expired credentials"));
+  setThreadAgent(created.id, { label: "hunk-3fa2", owned: true });
+  recordReviewNote("created", reply("agent:1", "one"));
+  recordReviewNote("created", reply("agent:2", "one"));
+  markRepliesRead("one");
+  recordReviewNote("created", reply("agent:3", "one"));
+  const thread = threadBoardSnapshot().threads[0]!;
+  const comment = thread.comments[0]!;
+
+  assert.equal(groupRowText(thread, 0, 60), " ▾   Authentication (1) · hunk-3fa2 ⌁");
+  assert.equal(commentRowText(comment, false, 60), "   └ Handle expired credentials · 3 replies (1 new)");
+  // Narrow panes shorten the reply suffix, then drop the agent label, before the text goes below 8 columns.
+  assert.equal(commentRowText(comment, false, 28), "   └ Handle e… · 3 (1 new)");
+  assert.equal(groupRowText(thread, 0, 28), " ▾   Authentication (1)");
+  setThreadAgent(created.id, undefined);
+  assert.equal(threadBoardSnapshot().threads[0]?.agent, undefined);
 });
