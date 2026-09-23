@@ -40,6 +40,14 @@ When a user saves a root review comment, it joins the Threads group that already
 holds the closest comment in the same file; a file with no assigned comment yet
 puts it in the session-wide **Unassigned** group. No dialog is shown: a toast names
 the group, and **Ctrl+R** moves the comment elsewhere or into a new named thread.
+
+**Unassigned** is the staging area and never holds an agent. Choosing one for it
+(**P**, or **A** → Choose agent) first promotes its comments into a numbered group,
+**Thread #1**, then **Thread #2** and so on, and the next unfiled comment starts a
+fresh Unassigned. While a group's agent is starting or working (its spinner is
+running) the group is immutable: **Ctrl+R** won't move its comments out or offer it
+as a destination, and a comment saved next to one of its comments stages in
+Unassigned instead of joining it. Once the agent finishes, move it in with **Ctrl+R**.
 Native replies remain in their root conversation and are never assigned. Saving a
 comment opens the right-hand Threads sidebar.
 
@@ -87,7 +95,9 @@ and both delivery and the agent's turn are followed in the background, so every 
 command stays usable while a group is working. Each prompt lists the group's conversations, each with the one
 comment ID to reply to, and rules out acting on any other review comment. Press **Ctrl+R** on
 a thread heading to move the whole displayed group, or on a comment to move only
-that comment, into **Unassigned**, another thread, or a new named thread. With a
+that comment, into **Unassigned**, another thread, or a new named thread. A group
+with an agent can't be moved whole, but its comments can, one at a time, once its
+agent is idle. With a
 Threads group selected, **X** confirms resolving that displayed group and all its
 native review comments; its temporary agent is closed during cleanup. With a comment
 selected, **X** resolves only that comment's native review thread and leaves other
