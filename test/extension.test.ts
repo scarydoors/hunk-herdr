@@ -184,7 +184,75 @@ test("Ctrl+T lands on the comment saved last, so P right after acts on its group
   h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
   h.inputs.push(null);
   await h.invoke("prompt");
-  assert.match(h.inputTitles.at(-1)!, /· Unassigned$/);
+  // Choosing an agent for Unassigned promotes it; Unassigned stays the staging area.
+  assert.match(h.inputTitles.at(-1)!, /· Thread #1$/);
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => thread.title), ["Authentication", "Thread #1"]);
+  assert.deepEqual(threadBoardSnapshot().threads[1]?.agent, { label: "pi", owned: false });
+  const still = selectedThreadItem();
+  assert.equal(still?.kind === "comment" ? still.comment.id : undefined, "user:two", "the selection follows the promoted group");
+
+  // The next unfiled comment starts a fresh Unassigned, and the next promotion is #2.
+  await h.emit("note_created", { note: { ...authNote, id: "user:three", filePath: "src/third.ts", line: 3, body: "And this" } });
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => thread.title), ["Authentication", "Thread #1", "Unassigned"]);
+  h.press({ name: "j" });
+  h.press({ name: "j" });
+  h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
+  h.inputs.push(null);
+  await h.invoke("prompt");
+  assert.match(h.inputTitles.at(-1)!, /· Thread #2$/);
+});
+
+test("a working group is immutable until its agent finishes, and new comments stage in Unassigned", async t => {
+  resetThreadBoard();
+  const first = {
+    id: "user:one", fileId: "runtime:one", filePath: "src/auth.ts", hunkIndex: 0,
+    side: "new" as const, line: 12, body: "Handle expiry", draft: false,
+  };
+  createThread("Tests", { ...first, id: "user:tests", filePath: "src/auth.test.ts", body: "Add a refresh test" });
+  createThread("Authentication", first);
+  const group = (title: string) => threadBoardSnapshot().threads.find(thread => thread.title === title);
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => [agent]);
+  t.mock.method(Bridge.prototype, "validate", async () => agent);
+  t.mock.method(Bridge.prototype, "skillPath", async () => "/skills/hunk-review.md");
+  t.mock.method(Bridge.prototype, "sessionId", async () => "session:one");
+  let settle!: (pane: Pane) => void;
+  t.mock.method(Bridge.prototype, "promptWhenReady", () => new Promise<Pane>(resolve => { settle = resolve; }));
+  t.mock.method(Bridge.prototype, "notify", async () => {});
+  const h = host();
+  h.state.snapshot = reviewAt([{ id: "user:one", line: 12 }]);
+  h.focus();
+  h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
+  h.inputs.push("");
+  await h.invoke("prompt");
+  assert.equal(group("Authentication")?.dispatching, true);
+
+  // Saved next to the working comment, it stages in Unassigned instead of joining.
+  await h.emit("note_created", { note: { ...first, id: "user:two", line: 14, body: "Also the refresh path" } });
+  assert.match(h.notices.at(-1)!, /^Added to Unassigned · Authentication is working/);
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]),
+    [["Tests", 1], ["Authentication", 1], ["Unassigned", 1]]);
+
+  // Nothing leaves the working group (navigation is still on its comment)…
+  assert.equal(selectedThreadItem()?.thread.title, "Authentication");
+  await h.invoke("reassign-thread-group");
+  assert.match(h.notices.at(-1)!, /Authentication is working; its comments can't change until the agent finishes/);
+
+  // …and nothing joins it: it isn't offered as a destination.
+  h.press({ name: "j" });
+  h.press({ name: "j" });
+  assert.equal(selectedThreadItem()?.kind === "comment" && selectedThreadItem()?.thread.title, "Unassigned");
+  h.answers.push("Leave unchanged");
+  await h.invoke("reassign-thread-group");
+  assert.ok(!h.options.at(-1)!.some(option => option.startsWith("Authentication")));
+  assert.ok(h.options.at(-1)!.some(option => option.startsWith("Tests")));
+
+  settle({ ...agent, agent_status: "idle" });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  h.answers.push("Authentication · 1 comment [2]");
+  await h.invoke("reassign-thread-group");
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]),
+    [["Tests", 1], ["Authentication", 2], ["Unassigned", 0]]);
 });
 
 test("Ctrl+T reads the review first, so a reload's stale verdicts show before you act", async () => {

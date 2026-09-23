@@ -78,6 +78,8 @@ export const UNASSIGNED_THREAD_ID = "thread:unassigned";
 export const UNASSIGNED_THREAD_TITLE = "Unassigned";
 
 let board: ThreadBoardSnapshot = { threads: [], navigating: false };
+/** Numbers the groups Unassigned is promoted into, so each gets a name of its own. */
+let promotedThreadCount = 0;
 const listeners = new Set<() => void>();
 /** Hunk's current anchor for each assigned comment, refreshed as the review changes. */
 const navigationByCommentId = new Map<string, LineAnchor>();
@@ -414,6 +416,28 @@ export function createThreadFromComment(sourceId: string, commentId: string, tit
   return thread;
 }
 
+/**
+ * Turns Unassigned into a numbered group of its own ("Thread #1", "Thread #2", …),
+ * keeping its place, comments and selection. Unassigned is the staging area, so it is
+ * promoted as soon as an agent is chosen for it; the next unfiled comment starts a
+ * fresh one.
+ */
+export function promoteUnassigned(): ReviewThread | undefined {
+  const source = board.threads.find(thread => thread.id === UNASSIGNED_THREAD_ID);
+  if (!source) return undefined;
+  let id: string;
+  do id = `thread:promoted:${++promotedThreadCount}`;
+  while (board.threads.some(thread => thread.id === id));
+  const thread: ReviewThread = { ...source, id, title: `Thread #${promotedThreadCount}` };
+  const selectedKey = board.selectedKey === `thread:${UNASSIGNED_THREAD_ID}`
+    ? `thread:${id}`
+    : board.selectedKey?.startsWith(`comment:${UNASSIGNED_THREAD_ID}:`)
+      ? `comment:${id}:${board.selectedKey.slice(`comment:${UNASSIGNED_THREAD_ID}:`.length)}`
+      : board.selectedKey;
+  publish({ ...board, selectedKey, threads: board.threads.map(candidate => candidate.id === source.id ? thread : candidate) });
+  return thread;
+}
+
 export function createThreadFromGroup(sourceId: string, title: string): ReviewThread | undefined {
   const source = board.threads.find(thread => thread.id === sourceId);
   if (!source) return undefined;
@@ -579,6 +603,7 @@ export function toggleThread(threadId: string): void {
 
 export function resetThreadBoard(): void {
   navigationByCommentId.clear();
+  promotedThreadCount = 0;
   publish({ threads: [], navigating: false, helpVisible: false });
 }
 

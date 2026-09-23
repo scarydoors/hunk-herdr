@@ -23,6 +23,7 @@ import {
   selectedThreadItem,
   threadForComment,
   UNASSIGNED_THREAD_ID,
+  promoteUnassigned,
   UNASSIGNED_THREAD_TITLE,
   moveThreadSelection,
   toggleThreadHelp,
@@ -178,8 +179,27 @@ export default function register(hunk: HunkExtensionAPI) {
   function alive(ctx: Context): boolean {
     return !disposed && ctx.review.snapshot() !== null;
   }
-  async function choose(ctx: Context, thread = selectedGroup(ctx), waitForReady = true): Promise<ThreadAgent | undefined> {
-    if (!thread) return undefined;
+  /**
+   * Unassigned is the staging area and never holds an agent: choosing one for it first
+   * promotes its comments into a numbered group of their own.
+   */
+  function promoted(thread: ReviewThread): ReviewThread {
+    if (thread.id !== UNASSIGNED_THREAD_ID) return thread;
+    const next = promoteUnassigned();
+    if (!next) return thread;
+    const draft = drafts.get(thread.id);
+    drafts.delete(thread.id);
+    if (draft !== undefined) drafts.set(next.id, draft);
+    return next;
+  }
+  /** The group an agent is bound to, as the board shows it now. */
+  function threadForBinding(binding: ThreadAgent): ReviewThread | undefined {
+    const id = [...threadAgents].find(([, candidate]) => candidate === binding)?.[0];
+    return threadBoardSnapshot().threads.find(thread => thread.id === id);
+  }
+  async function choose(ctx: Context, group = selectedGroup(ctx), waitForReady = true): Promise<ThreadAgent | undefined> {
+    if (!group) return undefined;
+    let thread: ReviewThread = group;
     if (threadAgent(thread)?.owned) {
       ctx.notify("Stop this group's temporary agent before choosing a replacement.", "warning");
       return undefined;
@@ -214,6 +234,7 @@ export default function register(hunk: HunkExtensionAPI) {
         kind = otherKinds.find(allowed => allowed === chosen);
         if (!kind) throw new Error("Agent type is not enabled.");
       }
+      thread = promoted(thread);
       const caller = await api.caller();
       const layout = await api.layout(caller);
       if (!alive(ctx)) return;
@@ -235,16 +256,19 @@ export default function register(hunk: HunkExtensionAPI) {
       }
     } else {
       const pane = await api.validate(agents[options.indexOf(picked)]!);
+      thread = promoted(thread);
       binding = { pane, bridge: api, owned: false, ready: Promise.resolve(pane) };
       bindAgent(thread.id, binding);
     }
     return binding;
   }
   async function prompt(ctx: Context): Promise<void> {
-    const thread = selectedGroup(ctx);
-    if (!thread) return;
-    const binding = threadAgent(thread) ?? await choose(ctx, thread, false);
+    const selected = selectedGroup(ctx);
+    if (!selected) return;
+    const binding = threadAgent(selected) ?? await choose(ctx, selected, false);
     if (!binding || !alive(ctx)) return;
+    // Choosing an agent for Unassigned promoted it into a numbered group.
+    const thread = threadForBinding(binding) ?? selected;
     const count = thread.comments.length;
     const text = await ctx.dialogs.input({
       title: `Prompt ${agentName(binding)} · ${modelHint(binding)} · ${thread.title}`,
@@ -467,23 +491,33 @@ export default function register(hunk: HunkExtensionAPI) {
     // represent an independently assignable orchestration request.
     if (note.draft || note.parentId) return;
     const nearest = nearestThreadForNote(note);
-    const thread = nearest && assignComment(nearest.id, note)
+    // A group whose agent is working is closed to new comments: they stage in Unassigned.
+    const busy = nearest?.dispatching ? nearest : undefined;
+    const thread = nearest && !busy && assignComment(nearest.id, note)
       ? threadBoardSnapshot().threads.find(candidate => candidate.id === nearest.id)!
       : assignUnassignedThread(note);
     ctx.panes.open("threads");
-    ctx.notify(`Added to ${thread.title} · Ctrl+T then P to prompt, Ctrl+R to move or name`);
+    ctx.notify(busy
+      ? `Added to ${thread.title} · ${busy.title} is working; Ctrl+R to move it there once it finishes`
+      : `Added to ${thread.title} · Ctrl+T then P to prompt, Ctrl+R to move or name`);
   }
   async function reassignSelectedGroup(ctx: Context): Promise<void> {
     const selection = resolveThreadSelection(ctx);
     if (!selection) return;
     const source = selection.thread;
     const comment = selection.kind === "comment" ? selection.comment : undefined;
-    if (threadAgents.has(source.id)) {
-      ctx.notify(`Stop or reassign this group's agent before moving ${comment ? "this comment" : "its comments"}.`, "warning");
+    // A working group is immutable until its agent finishes: nothing leaves or joins it.
+    if (source.dispatching) {
+      ctx.notify(`${source.title} is working; its comments can't change until the agent finishes.`, "warning");
+      return;
+    }
+    // Moving a whole group would leave its agent serving nothing.
+    if (!comment && threadAgents.has(source.id)) {
+      ctx.notify("Stop or reassign this group's agent before moving its comments.", "warning");
       return;
     }
     const entries = threadBoardSnapshot().threads
-      .filter(thread => thread.id !== source.id && thread.id !== UNASSIGNED_THREAD_ID)
+      .filter(thread => thread.id !== source.id && thread.id !== UNASSIGNED_THREAD_ID && !thread.dispatching)
       .map((thread, index) => ({
         thread,
         label: `${thread.title} · ${thread.comments.length} comment${thread.comments.length === 1 ? "" : "s"} [${index + 1}]`,
