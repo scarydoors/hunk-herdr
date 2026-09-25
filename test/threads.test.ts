@@ -111,3 +111,28 @@ test("a comment whose file left the review is skipped, though Hunk still calls i
   assert.deepEqual(result.conversations.map(conversation => conversation.replyTo), ["shown"]);
   assert.deepEqual(result.skipped, ["reverted"]);
 });
+
+test("a conversation counts as answered while an agent has the last word", () => {
+  const root = note("root");
+  const reply = { ...note("reply", { parentId: "root" }), source: "agent" as const, author: "pi" };
+  const followUp = note("follow-up", { parentId: "root" });
+  const [answered] = conversationsForPrompt(snapshot([root, reply]), ["root"]).conversations;
+  assert.equal(answered?.answered, true);
+  const [reopened] = conversationsForPrompt(snapshot([root, reply, followUp]), ["root"]).conversations;
+  assert.equal(reopened?.answered, false);
+  assert.deepEqual(reopened?.messages.map(message => message.from), ["user", "pi", "user"]);
+});
+
+test("a conversation is ordered by time, though the snapshot lists agent notes first", () => {
+  // Verified live on Hunk 0.22.0: snapshot notes come in live-note arrival order, then
+  // reviewer-note creation order, so an agent reply precedes the root it answers.
+  const root = { ...note("root"), createdAt: "2026-09-24T15:28:37.713Z" };
+  const reply = { ...note("reply", { parentId: "root" }), source: "agent" as const, author: "pi", createdAt: "2026-09-24T15:28:59.568Z" };
+  const followUp = { ...note("follow-up", { parentId: "root" }), createdAt: "2026-09-24T15:30:00.000Z" };
+  const [answered] = conversationsForPrompt(snapshot([reply, root]), ["root"]).conversations;
+  assert.deepEqual(answered?.messages.map(message => message.from), ["user", "pi"]);
+  assert.equal(answered?.answered, true);
+  const [reopened] = conversationsForPrompt(snapshot([reply, root, followUp]), ["root"]).conversations;
+  assert.deepEqual(reopened?.messages.map(message => message.text), ["root", "reply", "follow-up"]);
+  assert.equal(reopened?.answered, false);
+});

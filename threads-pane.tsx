@@ -1,12 +1,15 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { ExtensionPaneProps, ExtensionReviewNote, ExtensionReviewSnapshot, ExtensionReviewSnapshotNote } from "hunkdiff/extension";
-import { nearestToLine, type LineAnchor } from "./threads.ts";
+import { nearestToLine, preferredLine, type LineAnchor } from "./threads.ts";
 
 export interface AssignedComment {
   readonly id: string;
   readonly parentId?: string;
   readonly body: string;
+  /** Empty until a snapshot names the file of an agent comment that arrived with only its key. */
   readonly filePath: string;
+  /** Hunk's key for the file, kept for agent comments so their path can be filled in later. */
+  readonly fileKey?: string;
   readonly hunkIndex: number;
   readonly side: "old" | "new";
   readonly line: number;
@@ -62,6 +65,7 @@ const HELP_ROWS: readonly (readonly [string, string])[] = [
   ["Enter", "expand or collapse the group"],
   ["A", "agent actions for the group"],
   ["P", "prompt the group"],
+  ["I", "ask an agent; its comments form a new group"],
   ["X", "resolve the group or comment"],
   ["Ctrl+R", "move or name the group or comment"],
   ["Ctrl+L", "configure Pi/Claude model defaults"],
@@ -78,14 +82,23 @@ export const UNASSIGNED_THREAD_ID = "thread:unassigned";
 export const UNASSIGNED_THREAD_TITLE = "Unassigned";
 
 let board: ThreadBoardSnapshot = { threads: [], navigating: false };
-/** Numbers the groups Unassigned is promoted into, so each gets a name of its own. */
-let promotedThreadCount = 0;
+/** Numbers the groups started by a request, which have no comment to take an ID from. */
+let requestThreadCount = 0;
 const listeners = new Set<() => void>();
 /** Hunk's current anchor for each assigned comment, refreshed as the review changes. */
 const navigationByCommentId = new Map<string, LineAnchor>();
+/** Each reviewed file's path by Hunk's key, from the last snapshot: agent notes arrive with only the key. */
+const pathByFileKey = new Map<string, string>();
+
+/** Unassigned is the staging area, so it always leads the list wherever it was created. */
+function unassignedFirst(threads: readonly ReviewThread[]): readonly ReviewThread[] {
+  const index = threads.findIndex(thread => thread.id === UNASSIGNED_THREAD_ID);
+  if (index <= 0) return threads;
+  return [threads[index]!, ...threads.slice(0, index), ...threads.slice(index + 1)];
+}
 
 function publish(next: ThreadBoardSnapshot) {
-  board = next;
+  board = { ...next, threads: unassignedFirst(next.threads) };
   for (const listener of listeners) listener();
 }
 
@@ -112,6 +125,7 @@ export function threadBoardSnapshot(): ThreadBoardSnapshot {
  */
 export function syncCommentsWithReview(snapshot: ExtensionReviewSnapshot | null | undefined): void {
   if (!snapshot || !Array.isArray(snapshot.notes)) return;
+  for (const file of snapshot.files ?? []) pathByFileKey.set(file.fileKey, file.path);
   const byId = new Map(snapshot.notes.map(note => [note.id, note]));
   const children = new Map<string, ExtensionReviewSnapshotNote[]>();
   for (const note of snapshot.notes) {
@@ -124,9 +138,10 @@ export function syncCommentsWithReview(snapshot: ExtensionReviewSnapshot | null 
     const comments = thread.comments.map(comment => {
       const resolution = byId.get(comment.id)?.resolution ?? "orphaned";
       const replies = withReplies(comment, agentReplyIds(comment.id, children));
-      if (comment.resolution === resolution && replies === comment) return comment;
+      const filePath = comment.filePath || (comment.fileKey && pathByFileKey.get(comment.fileKey)) || "";
+      if (comment.resolution === resolution && replies === comment && comment.filePath === filePath) return comment;
       threadChanged = true;
-      return { ...replies, resolution };
+      return { ...replies, resolution, filePath };
     });
     changed ||= threadChanged;
     return threadChanged ? { ...thread, comments } : thread;
@@ -425,10 +440,11 @@ export function createThreadFromComment(sourceId: string, commentId: string, tit
 export function promoteUnassigned(): ReviewThread | undefined {
   const source = board.threads.find(thread => thread.id === UNASSIGNED_THREAD_ID);
   if (!source) return undefined;
-  let id: string;
-  do id = `thread:promoted:${++promotedThreadCount}`;
-  while (board.threads.some(thread => thread.id === id));
-  const thread: ReviewThread = { ...source, id, title: `Thread #${promotedThreadCount}` };
+  // The lowest number no group uses now, so resolving Thread #1 frees its name again.
+  let number = 1;
+  while (board.threads.some(thread => thread.title === `Thread #${number}` || thread.id === `thread:promoted:${number}`)) number++;
+  const id = `thread:promoted:${number}`;
+  const thread: ReviewThread = { ...source, id, title: `Thread #${number}` };
   const selectedKey = board.selectedKey === `thread:${UNASSIGNED_THREAD_ID}`
     ? `thread:${id}`
     : board.selectedKey?.startsWith(`comment:${UNASSIGNED_THREAD_ID}:`)
@@ -457,6 +473,80 @@ export function createThreadFromGroup(sourceId: string, title: string): ReviewTh
     threads: board.threads.flatMap(candidate => candidate.id === sourceId ? [thread] : [candidate]),
   });
   return thread;
+}
+
+/**
+ * An empty group for a request typed with no comment to start from. The agent's
+ * comments fill it as they arrive; until then it shows (0).
+ */
+export function createRequestThread(title: string): ReviewThread {
+  let id: string;
+  do id = `thread:request:${++requestThreadCount}`;
+  while (board.threads.some(thread => thread.id === id));
+  const thread: ReviewThread = { id, title: title.trim() || `Request #${requestThreadCount}`, expanded: true, comments: [] };
+  publish({ ...board, threads: [...board.threads, thread] });
+  return thread;
+}
+
+/** The author an agent sets on its comments to file them under a group: `<agent>:<group>`. */
+export function groupAuthor(agent: string, title: string): string {
+  return `${agent.replace(/:/g, "")}:${title}`;
+}
+
+/** The group named by an `<agent>:<group>` author, or undefined for any other author. */
+export function groupFromAuthor(author: string | undefined): string | undefined {
+  const at = author?.indexOf(":") ?? -1;
+  const group = at > 0 ? author!.slice(at + 1).trim() : "";
+  return group || undefined;
+}
+
+function agentComment(note: ExtensionReviewSnapshotNote): AssignedComment {
+  const at = preferredLine(note.anchor) ?? { side: "new" as const, line: 1 };
+  return {
+    id: note.id,
+    body: note.summary.trim(),
+    filePath: pathByFileKey.get(note.fileKey) ?? "",
+    fileKey: note.fileKey,
+    hunkIndex: note.anchor.ownerHunkIndex ?? note.anchor.intersectingHunkIndices[0] ?? 0,
+    side: at.side,
+    line: at.line,
+    anchor: {
+      ...(note.anchor.oldRange ? { oldRange: note.anchor.oldRange } : {}),
+      ...(note.anchor.newRange ? { newRange: note.anchor.newRange } : {}),
+      preferred: at,
+    },
+    resolution: note.resolution,
+  };
+}
+
+/**
+ * Files an agent's root comment by its author. `requestThreadId` is the group whose
+ * request handed out that exact author, and wins while it exists; otherwise the group
+ * is found by the name after the colon, and created when none has it. A comment whose
+ * author names no group is left out of Threads, as agent comments always were. A
+ * working group still takes these: the agent posting is the work it was asked for.
+ */
+export function fileAgentComment(note: ExtensionReviewSnapshotNote, requestThreadId?: string): ReviewThread | undefined {
+  if (note.parentId || note.source === "user") return undefined;
+  const filed = threadForComment(note.id);
+  if (filed) {
+    // An edited agent comment keeps its replies; only its text and anchor move.
+    updateComments(comment => comment.id === note.id ? { ...comment, ...agentComment(note), replyIds: comment.replyIds, unreadReplyIds: comment.unreadReplyIds } : comment);
+    return threadForComment(note.id);
+  }
+  const named = groupFromAuthor(note.author);
+  const target = board.threads.find(thread => thread.id === requestThreadId)
+    ?? (named ? board.threads.find(thread => thread.id !== UNASSIGNED_THREAD_ID && thread.title.trim().toLowerCase() === named.toLowerCase()) : undefined);
+  if (!target && !named) return undefined;
+  const comment = agentComment(note);
+  if (!target) {
+    const thread: ReviewThread = { id: `thread:agent:${note.id}`, title: named!, expanded: true, comments: [comment] };
+    publish({ ...board, threads: [...board.threads, thread], lastAddedCommentId: note.id });
+    return thread;
+  }
+  const next = { ...target, expanded: true, comments: [...target.comments, comment] };
+  publish({ ...board, threads: board.threads.map(thread => thread.id === target.id ? next : thread), lastAddedCommentId: note.id });
+  return next;
 }
 
 /** Marks a group as actively starting or receiving work from its agent. */
@@ -603,7 +693,8 @@ export function toggleThread(threadId: string): void {
 
 export function resetThreadBoard(): void {
   navigationByCommentId.clear();
-  promotedThreadCount = 0;
+  pathByFileKey.clear();
+  requestThreadCount = 0;
   publish({ threads: [], navigating: false, helpVisible: false });
 }
 
@@ -612,9 +703,10 @@ export function resetThreadBoard(): void {
  * its file leaves the diff (the change was reverted), though it no longer renders it and
  * refuses replies to it. The pane's file list is fresh on every reload, so a comment is
  * marked the moment its file goes, and unmarked the moment it's back under the same ID.
+ * An agent comment whose path isn't known yet is left as Hunk reported it.
  */
 export function asRendered(comment: AssignedComment, files: readonly { readonly path: string }[]): AssignedComment {
-  return comment.resolution === "orphaned" || files.some(file => file.path === comment.filePath)
+  return comment.resolution === "orphaned" || !comment.filePath || files.some(file => file.path === comment.filePath)
     ? comment
     : { ...comment, resolution: "orphaned" };
 }
@@ -730,7 +822,7 @@ export function ThreadsPane({ files, theme, actions, width }: ExtensionPaneProps
         )) : null}
         {!state.helpVisible && state.threads.length === 0 ? (
           <text
-            content=" Save a user comment to create the first thread."
+            content=" Save a comment, or press I to ask an agent."
             style={{ fg: theme.muted, bg: theme.panel }}
           />
         ) : null}

@@ -21,6 +21,7 @@ function host(config: Record<string, unknown> = {}) {
   const keyboardModes = new Map<string, KeyboardMode>();
   const inputTitles: string[] = [];
   const inputInitials: string[] = [];
+  const inputPlaceholders: string[] = [];
   let activeKeyboardMode: string | undefined;
   const events = new Map<string, (payload: unknown, ctx: unknown) => void | Promise<void>>();
   const state = {
@@ -45,7 +46,7 @@ function host(config: Record<string, unknown> = {}) {
     },
     dialogs: {
       select: async (arg: { options: string[] }) => { options.push(arg.options); return answers.shift() ?? null; },
-      input: async (arg: { title: string; initial?: string }) => { state.inputCalls++; inputTitles.push(arg.title); inputInitials.push(arg.initial ?? ""); return inputs.shift() ?? null; }, confirm: async () => state.confirmed,
+      input: async (arg: { title: string; initial?: string; placeholder?: string }) => { state.inputCalls++; inputTitles.push(arg.title); inputInitials.push(arg.initial ?? ""); inputPlaceholders.push(arg.placeholder ?? ""); return inputs.shift() ?? null; }, confirm: async () => state.confirmed,
     },
   } as unknown as ExtensionCommandContext;
   register({
@@ -58,7 +59,7 @@ function host(config: Record<string, unknown> = {}) {
     log: () => {},
   } as unknown as HunkExtensionAPI);
   return {
-    commands, ctx, answers, inputs, inputTitles, inputInitials, notices, options, openedPanes, state,
+    commands, ctx, answers, inputs, inputTitles, inputInitials, inputPlaceholders, notices, options, openedPanes, state,
     invoke: async (id: string) => commands.get(id)!(ctx),
     /** Focus Threads navigation, which selects the comment saved last (or the first row). */
     focus: () => ctx.keyboardModes.enterMode("threads"),
@@ -98,7 +99,7 @@ function cursorAt(line: number | null): ExtensionReviewSelection {
 
 test("registers discoverable commands and diagnostic CLI without requiring status-row API", () => {
   const h = host();
-  assert.deepEqual([...h.commands.keys()], ["menu", "threads", "focus-threads", "pick", "help", "models", "prompt", "status", "reveal", "hide", "stop", "resolve-thread", "reassign-thread-group"]);
+  assert.deepEqual([...h.commands.keys()], ["menu", "threads", "focus-threads", "pick", "help", "models", "prompt", "request", "status", "reveal", "hide", "stop", "resolve-thread", "reassign-thread-group"]);
   assert.equal(h.state.cliRegistered, true);
   assert.equal(h.state.paneRegistered, true);
   assert.equal(h.state.keyboardModeRegistered, true);
@@ -123,9 +124,9 @@ test("a saved comment joins the group holding the closest comment in the same fi
   await h.emit("note_created", { note: { ...authNote, id: "user:three", line: 190, body: "Cover the failure path" } });
   await h.emit("note_created", { note: { ...authNote, id: "user:four", filePath: "src/other.ts", fileId: "runtime:two", body: "Unrelated" } });
   assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.map(comment => comment.id)]), [
+    ["Unassigned", ["user:four"]],
     ["Authentication", ["user:one", "user:two"]],
     ["Tests", ["user:test", "user:three"]],
-    ["Unassigned", ["user:four"]],
   ]);
   assert.equal(h.notices[0], "Added to Authentication · Ctrl+T then P to prompt, Ctrl+R to move or name");
 });
@@ -186,16 +187,16 @@ test("Ctrl+T lands on the comment saved last, so P right after acts on its group
   await h.invoke("prompt");
   // Choosing an agent for Unassigned promotes it; Unassigned stays the staging area.
   assert.match(h.inputTitles.at(-1)!, /· Thread #1$/);
-  assert.deepEqual(threadBoardSnapshot().threads.map(thread => thread.title), ["Authentication", "Thread #1"]);
-  assert.deepEqual(threadBoardSnapshot().threads[1]?.agent, { label: "pi", owned: false });
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => thread.title), ["Thread #1", "Authentication"]);
+  assert.deepEqual(threadBoardSnapshot().threads[0]?.agent, { label: "pi", owned: false });
   const still = selectedThreadItem();
   assert.equal(still?.kind === "comment" ? still.comment.id : undefined, "user:two", "the selection follows the promoted group");
 
   // The next unfiled comment starts a fresh Unassigned, and the next promotion is #2.
   await h.emit("note_created", { note: { ...authNote, id: "user:three", filePath: "src/third.ts", line: 3, body: "And this" } });
-  assert.deepEqual(threadBoardSnapshot().threads.map(thread => thread.title), ["Authentication", "Thread #1", "Unassigned"]);
-  h.press({ name: "j" });
-  h.press({ name: "j" });
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => thread.title), ["Unassigned", "Thread #1", "Authentication"]);
+  h.press({ name: "k" });
+  h.press({ name: "k" });
   h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
   h.inputs.push(null);
   await h.invoke("prompt");
@@ -231,7 +232,7 @@ test("a working group is immutable until its agent finishes, and new comments st
   await h.emit("note_created", { note: { ...first, id: "user:two", line: 14, body: "Also the refresh path" } });
   assert.match(h.notices.at(-1)!, /^Added to Unassigned · Authentication is working/);
   assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]),
-    [["Tests", 1], ["Authentication", 1], ["Unassigned", 1]]);
+    [["Unassigned", 1], ["Tests", 1], ["Authentication", 1]]);
 
   // Nothing leaves the working group (navigation is still on its comment)…
   assert.equal(selectedThreadItem()?.thread.title, "Authentication");
@@ -239,8 +240,7 @@ test("a working group is immutable until its agent finishes, and new comments st
   assert.match(h.notices.at(-1)!, /Authentication is working; its comments can't change until the agent finishes/);
 
   // …and nothing joins it: it isn't offered as a destination.
-  h.press({ name: "j" });
-  h.press({ name: "j" });
+  for (let step = 0; step < 4; step++) h.press({ name: "k" });
   assert.equal(selectedThreadItem()?.kind === "comment" && selectedThreadItem()?.thread.title, "Unassigned");
   h.answers.push("Leave unchanged");
   await h.invoke("reassign-thread-group");
@@ -252,7 +252,7 @@ test("a working group is immutable until its agent finishes, and new comments st
   h.answers.push("Authentication · 1 comment [2]");
   await h.invoke("reassign-thread-group");
   assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]),
-    [["Tests", 1], ["Authentication", 2], ["Unassigned", 0]]);
+    [["Unassigned", 0], ["Tests", 1], ["Authentication", 2]]);
 });
 
 test("Ctrl+T reads the review first, so a reload's stale verdicts show before you act", async () => {
@@ -638,9 +638,19 @@ test("an empty prompt asks for replies to the group's conversations and clears t
   t.mock.method(Bridge.prototype, "promptWhenReady", (_pane: Pane, text: string) => { payloads.push(text); return new Promise<Pane>(resolve => { settle = resolve; }); });
   const h = host();
   const review = reviewAt([{ id: "user:one", line: 12 }, { id: "user:other", line: 30 }]);
-  h.state.snapshot = { ...review, notes: [...review.notes, { ...review.notes[0]!, id: "agent:reply", parentId: "user:one", source: "agent", author: "reviewer", summary: "Which token?" }] };
+  const reply = { ...review.notes[0]!, id: "agent:reply", parentId: "user:one", source: "agent" as const, author: "reviewer", summary: "Which token?" };
+  h.state.snapshot = { ...review, notes: [...review.notes, reply] };
   h.focus();
   h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
+  // The agent had the last word, so an empty prompt has nothing to answer.
+  h.inputs.push("");
+  await h.invoke("prompt");
+  assert.equal(payloads.length, 0);
+  assert.match(h.notices.at(-1)!, /every comment already has an agent reply/);
+  assert.match(h.inputPlaceholders.at(-1)!, /Every comment here has a reply/);
+
+  // The user answers back, and that conversation awaits a reply again.
+  h.state.snapshot = { ...review, notes: [...review.notes, reply, { ...review.notes[0]!, id: "user:follow-up", parentId: "user:one", summary: "The refresh token" }] };
   h.inputs.push("   ");
   await h.invoke("prompt");
   await new Promise<void>(resolve => setImmediate(resolve));
@@ -648,7 +658,8 @@ test("an empty prompt asks for replies to the group's conversations and clears t
   const payload = payloads[0]!;
   assert.match(payload, /Before starting, read the Hunk review skill at "\/skills\/hunk-review.md"/);
   assert.match(payload, /Use session "session:one" as the session selector/);
-  assert.match(payload, /1\. reply to: user:one — src\/auth\.ts, new line 12\n   user: Comment user:one\n   reviewer: Which token\?$/);
+  assert.match(h.inputPlaceholders.at(-1)!, /reply to the 1 comment awaiting a reply/);
+  assert.match(payload, /1\. reply to: user:one — src\/auth\.ts, new line 12\n   user: Comment user:one\n   reviewer: Which token\?\n   user: The refresh token$/);
   assert.doesNotMatch(payload, /user:other/, "comments outside the group are never sent");
   assert.doesNotMatch(payload, /Additional guidance/);
 
@@ -721,4 +732,57 @@ test("overlapping actions are refused rather than double spawning", async t => {
   assert.ok(h.notices.includes("Herdr operation in progress…"));
   finish(caller);
   await pending;
+});
+
+test("I asks an agent with no comment to start from, and files its comments into one new group", async t => {
+  resetThreadBoard();
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => [agent]);
+  t.mock.method(Bridge.prototype, "validate", async () => agent);
+  t.mock.method(Bridge.prototype, "skillPath", async () => "/skills/hunk-review.md");
+  t.mock.method(Bridge.prototype, "sessionId", async () => "session:one");
+  const payloads: string[] = [];
+  let settle!: (pane: Pane) => void;
+  t.mock.method(Bridge.prototype, "promptWhenReady", (_pane: Pane, text: string) => { payloads.push(text); return new Promise<Pane>(resolve => { settle = resolve; }); });
+  const h = host();
+  h.state.snapshot = reviewAt([]);
+  h.answers.push(`○ pi · idle · ${agent.pane_id} · `);
+  h.inputs.push("Check the token refresh path\nLook for races too");
+  // Works from the review: no Threads focus or selection needed.
+  await h.invoke("request");
+  await new Promise<void>(resolve => setImmediate(resolve));
+
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length, thread.dispatching]), [["Check the token refresh path", 0, true]]);
+  assert.equal(payloads.length, 1);
+  assert.match(payloads[0]!, /Set the author of every comment to "pi:Check the token refresh path", exactly/);
+  assert.match(payloads[0]!, /Request from the user:\nCheck the token refresh path\nLook for races too$/);
+  assert.match(h.notices.at(-1)!, /^Sent to pi: Check the token refresh path\./);
+
+  // The agent's root comment joins the group while it is still working; its reply stays nested.
+  const [base] = reviewAt([{ id: "agent:one", line: 20, source: "agent" }]).notes;
+  await h.emit("note_changed", { kind: "created", note: { ...base!, author: "pi:Check the token refresh path", summary: "Refresh can race the retry" } });
+  await h.emit("note_changed", { kind: "created", note: { ...base!, id: "agent:two", parentId: "agent:one", author: "pi:Check the token refresh path" } });
+  const [group] = threadBoardSnapshot().threads;
+  assert.deepEqual(group?.comments.map(comment => [comment.id, comment.body, comment.line]), [["agent:one", "Refresh can race the retry", 20]]);
+  assert.equal(group?.comments[0]?.filePath, "src/auth.ts", "the path is known from the snapshot the command read");
+  settle({ ...agent, agent_status: "idle" });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(threadBoardSnapshot().threads[0]?.completed, true);
+});
+
+test("I with the agent picker cancelled leaves no group behind and keeps the request", async t => {
+  resetThreadBoard();
+  t.mock.method(Bridge.prototype, "caller", async () => caller);
+  t.mock.method(Bridge.prototype, "agents", async () => [agent]);
+  t.mock.method(Bridge.prototype, "skillPath", async () => "/skills/hunk-review.md");
+  t.mock.method(Bridge.prototype, "sessionId", async () => "session:one");
+  const h = host();
+  h.state.snapshot = reviewAt([]);
+  h.inputs.push("Audit the error messages");
+  h.answers.push("Leave unchanged");
+  await h.invoke("request");
+  assert.deepEqual(threadBoardSnapshot().threads, []);
+  h.inputs.push(null);
+  await h.invoke("request");
+  assert.equal(h.inputInitials.at(-1), "Audit the error messages");
 });

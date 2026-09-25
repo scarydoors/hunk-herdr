@@ -22,6 +22,8 @@ selected comment, and **P**, **A**, **Ctrl+R** and **X** act on the selected row
   last; `j`/`k` (or arrows) move, the diff follows, and Enter expands or collapses a group.
 - **A** — actions for the selected group: choose, prompt, inspect, reveal, or stop its agent.
 - **P** — prompt the selected group (opens its agent picker if none is assigned).
+- **I** — ask an agent anything, with no comment to start from. Its comments on the
+  review gather in one new group named after your request's first line.
 - **Ctrl+R** — move the selected group or comment to another thread, or name a new one.
 - **T** — show or hide the session-local Threads sidebar.
 - **Esc** — leave Threads navigation and return to the review; the sidebar stays open.
@@ -83,6 +85,20 @@ restores the same note IDs). **P** skips them meanwhile; **X** still resolves th
 All Threads state lives in the Hunk process, so reloads keep it: watch reloads,
 the refresh key, and `hunk session reload` onto other content. Only quitting Hunk or a
 crash loses it, and quitting closes the temporary agents this session started.
+
+**I** starts from a request rather than a comment. Type what the agent should look at
+or do, then choose it from the same picker as **P**. A group named after the request's
+first line appears at (0) and fills as the agent answers with new root comments, one
+per point, on the lines they concern. The prompt tells it to set each comment's author
+to `<agent>:<group>` (for example `pi:Check the token refresh path`), and the sidebar
+files comments by that author: first by the exact author this request handed out, so a
+later rename doesn't lose them, then by the group name after the colon, ignoring case,
+and otherwise into a new group with that name. Any agent can use the convention to file
+its comments without having been asked through **I**; an agent comment whose author
+has no colon stays out of Threads, as before. The group takes the agent's comments
+while it's working, which other comments can't join. Cancelling the picker removes the
+empty group and keeps the request for the next **I**, as does a failed hand-off. Once
+comments are in, **P** follows up on them like any other group.
 
 **P** prompts the group's assigned agent, or opens the picker if it has none. The
 picker's first row starts the configured default agent (or the only configured kind),
@@ -166,10 +182,15 @@ command syntax is left to Hunk's own review skill, which updates with Hunk:
   asks again, as does any prompt after an uncertain hand-off.
 - The exact live **session ID**, matched to this review by the extension, so the
   agent never has to choose between sessions. If it can't be identified, nothing is sent.
-- Every **conversation** in the group, taken from the review at submission time:
-  the root comment's ID to reply to, its file and line, a stale mark when Hunk reports
-  the code there changed, then the root and its replies in order. Comments Hunk no
-  longer renders are skipped, and the notice says how many.
+- Every **conversation awaiting a reply** in the group, taken from the review at
+  submission time: one whose latest message is yours. Each lists the root comment's ID
+  to reply to, its file and line, a stale mark when Hunk reports the code there
+  changed, then the root and its replies in order. A conversation the agent answered
+  last is left out, so re-prompting a group after adding a comment answers only what
+  you said since, and the agent never replies to itself. With typed guidance, answered
+  conversations are listed as context only; with no guidance and nothing awaiting a
+  reply, nothing is sent. Comments Hunk no longer renders are skipped, and the notice
+  says how many.
 - The rules: reply only in the listed conversations; never resolve, delete or start
   comments; don't edit files unless your guidance asks; ask a question in the thread
   when a comment is unclear rather than waiting in the hidden pane; don't move your

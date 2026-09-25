@@ -154,7 +154,8 @@ test("cleanup refuses replaced agents and moved panes", async () => {
 
 const conversation = {
   replyTo: "user:one", filePath: "src/auth.ts", side: "new" as const, line: 12, stale: true,
-  messages: [{ from: "user", text: "Handle expiry\nand refresh" }, { from: "reviewer", text: "Which token?" }],
+  messages: [{ from: "user", text: "Handle expiry\nand refresh" }, { from: "reviewer", text: "Which token?" }, { from: "user", text: "The refresh token." }],
+  answered: false,
 };
 const groupPrompt = {
   skill: "/nix/store/skill.md", skillRead: false, sessionId: "session:one", cwd: "/review",
@@ -167,7 +168,7 @@ test("group prompt carries the skill path, exact session and every reply-to ID, 
   assert.doesNotMatch(payload, /hunk skill path|--reply-to|comment add|session list/, "command syntax is left to the skill");
   assert.match(payload, /Use session "session:one" as the session selector/);
   assert.match(payload, /Review working directory: "\/review"/);
-  assert.match(payload, /1\. reply to: user:one — src\/auth\.ts, new line 12 \(stale: the code at this line has changed since it was written\)\n   user: Handle expiry\n     and refresh\n   reviewer: Which token\?$/);
+  assert.match(payload, /1\. reply to: user:one — src\/auth\.ts, new line 12 \(stale: the code at this line has changed since it was written\)\n   user: Handle expiry\n     and refresh\n   reviewer: Which token\?\n   user: The refresh token\.$/);
   assert.match(payload, /never resolve or delete a comment/);
   assert.match(payload, /Don't edit files unless the user's guidance below explicitly asks you to/);
   assert.match(payload, /Set the reply author to "hunk-pi"/);
@@ -181,6 +182,28 @@ test("follow-ups skip re-reading the skill, and typed text is added as guidance"
   assert.doesNotMatch(payload, /Before starting, read/);
   assert.ok(payload.endsWith(`Additional guidance from the user:\n${text}`));
   assert.match(payload, /Task: answer each review conversation/, "guidance never replaces the task");
+});
+
+test("a re-prompt lists only conversations awaiting the user's answer, never ones the agent answered last", () => {
+  const answered = { ...conversation, replyTo: "user:two", messages: [{ from: "user", text: "Rename this" }, { from: "hunk-pi", text: "Done: renamed." }], answered: true };
+  const fresh = { ...conversation, replyTo: "user:three", stale: false, messages: [{ from: "user", text: "Also check the cache" }] };
+  const payload = buildPrompt({ ...groupPrompt, conversations: [answered, fresh] });
+  assert.match(payload, /Awaiting a reply \(the complete list\):\n1\. reply to: user:three/);
+  assert.doesNotMatch(payload, /user:two|Done: renamed/, "without guidance an answered conversation is left out entirely");
+  assert.match(payload, /Never reply to your own or another agent's message/);
+
+  const guided = buildPrompt({ ...groupPrompt, conversations: [answered, fresh], guidance: "Undo the rename." });
+  assert.match(guided, /Already answered \(context only\):\n1\. reply to: user:two/);
+  assert.match(guided, /reply there only if the user's guidance below asks for it/);
+});
+
+test("with every conversation answered, the guidance becomes the task", () => {
+  const answered = { ...conversation, messages: [{ from: "user", text: "Rename this" }, { from: "hunk-pi", text: "Done." }], answered: true };
+  const payload = buildPrompt({ ...groupPrompt, conversations: [answered], guidance: "Now update the tests." });
+  assert.match(payload, /Task: carry out the user's guidance below/);
+  assert.match(payload, /Reply only where the guidance asks you to/);
+  assert.doesNotMatch(payload, /Awaiting a reply/);
+  assert.match(payload, /Already answered \(context only\):\n1\. reply to: user:one/);
 });
 
 

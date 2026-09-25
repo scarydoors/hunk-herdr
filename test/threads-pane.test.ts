@@ -1,12 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { ExtensionReviewNote, ExtensionReviewSnapshot } from "hunkdiff/extension";
+import type { ExtensionReviewNote, ExtensionReviewSnapshot, ExtensionReviewSnapshotNote } from "hunkdiff/extension";
 import {
   assignComment,
   asRendered,
   commentRowText,
+  createRequestThread,
+  promoteUnassigned,
+  assignUnassignedThread,
+  removeThreadGroup,
   createThread,
   createThreadFromComment,
+  fileAgentComment,
+  groupFromAuthor,
   createThreadFromGroup,
   moveComment,
   moveThreadComments,
@@ -302,4 +308,54 @@ test("a comment is drawn orphaned while its file is out of the diff, and restore
   assert.equal(asRendered(comment, []).resolution, "orphaned");
   assert.equal(commentRowText(asRendered(comment, []), false, 40), "   └ ✗ Handle expiry");
   assert.equal(asRendered(comment, [{ path: "src/auth.ts" }]), comment, "unchanged while its file is shown");
+});
+
+test("agent root comments are filed by the group their author names", () => {
+  resetThreadBoard();
+  const note = (id: string, author: string | undefined, extra: Partial<ExtensionReviewSnapshotNote> = {}): ExtensionReviewSnapshotNote => ({
+    id, source: "agent", author, fileKey: "file:auth", summary: `Note ${id}`, editable: false, resolution: "active",
+    anchor: { newRange: [5, 5], preferred: { side: "new", line: 5 }, intersectingHunkIndices: [0], ownerHunkIndex: 0 }, ...extra,
+  });
+  const request = createRequestThread("Refresh path");
+  // The request's own author wins, even when the name no longer matches.
+  assert.equal(fileAgentComment(note("a", "pi:Renamed"), request.id)?.id, request.id);
+  // Otherwise the name after the colon picks the group, ignoring case.
+  assert.equal(fileAgentComment(note("b", "claude:refresh PATH"))?.id, request.id);
+  // An unknown name starts a group of its own.
+  assert.equal(fileAgentComment(note("c", "claude:Error copy"))?.title, "Error copy");
+  // No group named, a reply, or a user note: left out of Threads.
+  assert.equal(fileAgentComment(note("d", "claude")), undefined);
+  assert.equal(fileAgentComment(note("e", "pi:Refresh path", { parentId: "a" })), undefined);
+  assert.equal(fileAgentComment(note("f", "pi:Refresh path", { source: "user" })), undefined);
+  assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.map(comment => comment.id)]), [["Refresh path", ["a", "b"]], ["Error copy", ["c"]]]);
+  assert.equal(groupFromAuthor("pi:Scope: auth"), "Scope: auth");
+});
+
+test("an agent comment on a file the sidebar hasn't seen gets its path from the next snapshot", () => {
+  resetThreadBoard();
+  const request = createRequestThread("New file");
+  const note: ExtensionReviewSnapshotNote = {
+    id: "agent:one", source: "agent", author: "pi:New file", fileKey: "file:new", summary: "Added a helper", editable: false, resolution: "active",
+    anchor: { newRange: [3, 3], intersectingHunkIndices: [0], ownerHunkIndex: 0 },
+  };
+  fileAgentComment(note, request.id);
+  const pending = threadBoardSnapshot().threads[0]!.comments[0]!;
+  assert.equal(pending.filePath, "");
+  assert.equal(asRendered(pending, []), pending, "not marked orphaned while its path is unknown");
+  syncCommentsWithReview({ generation: "g", stateRevision: 2, notes: [note], files: [{ fileKey: "file:new", path: "src/helper.ts" } as ExtensionReviewSnapshot["files"][number]] });
+  assert.equal(threadBoardSnapshot().threads[0]!.comments[0]!.filePath, "src/helper.ts");
+});
+
+test("a promoted group takes the lowest Thread number no group uses now", () => {
+  resetThreadBoard();
+  const note = (id: string): ExtensionReviewNote => ({ id, fileId: "f", filePath: "src/a.ts", hunkIndex: 0, side: "new", line: 1, body: id, draft: false });
+  assignUnassignedThread(note("one"));
+  const first = promoteUnassigned()!;
+  assignUnassignedThread(note("two"));
+  assert.equal(promoteUnassigned()?.title, "Thread #2");
+  removeThreadGroup(first.id);
+  assignUnassignedThread(note("three"));
+  assert.equal(promoteUnassigned()?.title, "Thread #1", "resolving Thread #1 frees its number");
+  assignUnassignedThread(note("four"));
+  assert.equal(promoteUnassigned()?.title, "Thread #3");
 });
