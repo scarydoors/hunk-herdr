@@ -1,7 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { matchesKey } from "hunkdiff/extension";
 import type { ExtensionCommandContext, ExtensionEventContext, ExtensionReviewNote, HunkExtensionAPI } from "hunkdiff/extension";
-import { Bridge, buildPrompt, label, run, sameAgent, type Pane } from "./bridge.ts";
+import { Bridge, buildPrompt, buildRequestPrompt, label, run, sameAgent, type Pane } from "./bridge.ts";
 import { agentConfig, notificationTarget, type AgentKind } from "./config.ts";
 import { modelOptions } from "./model-catalog.ts";
 import { isConfigurableAgentKind, loadModelDefaults, saveModelDefaults, type ConfigurableAgentKind, type ModelDefaults } from "./model-defaults.ts";
@@ -15,6 +15,10 @@ import {
   assignUnassignedThread,
   createThreadFromComment,
   createThreadFromGroup,
+  createRequestThread,
+  fileAgentComment,
+  groupAuthor,
+  suggestedThreadTitle,
   moveComment,
   moveCommentToUnassigned,
   moveThreadComments,
@@ -79,6 +83,10 @@ export default function register(hunk: HunkExtensionAPI) {
   const threadAgents = new Map<string, ThreadAgent>();
   const dispatches = new Map<string, number>();
   const drafts = new Map<string, string>();
+  /** The group each request's exact comment author files under, however the group is renamed. */
+  const requestAuthors = new Map<string, string>();
+  /** The request typed for I, kept until it reaches an agent. */
+  let requestDraft: string | undefined;
   let disposed = false;
   let pending: Promise<void> | undefined;
   let originallyZoomed: boolean | undefined;
@@ -189,7 +197,9 @@ export default function register(hunk: HunkExtensionAPI) {
     if (!next) return thread;
     const draft = drafts.get(thread.id);
     drafts.delete(thread.id);
+    // Numbers are reused once a group is gone, so never inherit that group's draft.
     if (draft !== undefined) drafts.set(next.id, draft);
+    else drafts.delete(next.id);
     return next;
   }
   /** The group an agent is bound to, as the board shows it now. */
@@ -269,10 +279,15 @@ export default function register(hunk: HunkExtensionAPI) {
     if (!binding || !alive(ctx)) return;
     // Choosing an agent for Unassigned promoted it into a numbered group.
     const thread = threadForBinding(binding) ?? selected;
-    const count = thread.comments.length;
+    const before = ctx.review.snapshot();
+    const count = Array.isArray(before?.notes)
+      ? conversationsForPrompt(before!, thread.comments.map(comment => comment.id)).conversations.filter(conversation => !conversation.answered).length
+      : thread.comments.length;
     const text = await ctx.dialogs.input({
       title: `Prompt ${agentName(binding)} · ${modelHint(binding)} · ${thread.title}`,
-      placeholder: `Enter to reply to the ${count} listed comment${count === 1 ? "" : "s"}, or add guidance…`,
+      placeholder: count
+        ? `Enter to reply to the ${count} comment${count === 1 ? "" : "s"} awaiting a reply, or add guidance…`
+        : "Every comment here has a reply; type guidance, or reply to a comment first…",
       initial: drafts.get(thread.id) ?? "",
     });
     // Esc cancels; typed text is guidance on top of replying to the listed comments.
@@ -284,6 +299,11 @@ export default function register(hunk: HunkExtensionAPI) {
     const { conversations, skipped } = conversationsForPrompt(review, thread.comments.map(comment => comment.id));
     if (!conversations.length) {
       ctx.notify(`${thread.title}: none of its comments are still shown in the review. Nothing sent.`, "warning");
+      return;
+    }
+    // A re-prompt answers only what the user said since; the agent never answers itself.
+    if (!typed && conversations.every(conversation => conversation.answered)) {
+      ctx.notify(`${thread.title}: every comment already has an agent reply. Reply to one, or type guidance. Nothing sent.`, "warning");
       return;
     }
     const [skill, sessionId] = await Promise.all([
@@ -304,8 +324,57 @@ export default function register(hunk: HunkExtensionAPI) {
     // therefore hold the single-operation lock for the rest of the session, so the
     // turn is watched here instead: the group's own spinner reports it, and every
     // other command — resolving, stopping this agent — stays usable meanwhile.
-    watchDispatch(ctx, thread, binding, payload, typed, skill);
+    watchDispatch(ctx, thread, binding, payload, skill, () => {
+      if (typed && !drafts.has(thread.id)) drafts.set(thread.id, typed);
+    });
     ctx.notify(`Sent to ${agentName(binding)}: ${thread.title}.${skipped.length ? ` Skipped ${skipped.length} comment${skipped.length === 1 ? "" : "s"} no longer shown in the review.` : ""}`);
+  }
+  /**
+   * I: a request with no comment to start from. It gets a group of its own, named by
+   * its first line, and the agent files its answers there as new root comments whose
+   * author names the group. Nothing is created until the review session is known, and
+   * the group goes again if no agent is chosen for it.
+   */
+  async function request(ctx: Context): Promise<void> {
+    const text = await ctx.dialogs.input({
+      title: "Ask an agent",
+      placeholder: "What should it look at or do? Its comments form a new Threads group…",
+      initial: requestDraft ?? "",
+    });
+    if (text === null || text === undefined || !alive(ctx)) return;
+    if (!text.trim()) { requestDraft = undefined; ctx.notify("Nothing to ask; type a request first.", "warning"); return; }
+    requestDraft = text;
+    const review = ctx.review.snapshot();
+    if (!review) return;
+    const api = client(ctx);
+    const [skill, sessionId] = await Promise.all([
+      api.skillPath(),
+      api.sessionId(review.generation).catch((error: unknown) => {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}. Nothing sent.`);
+      }),
+    ]);
+    if (!skill) throw new Error("hunk skill path returned no path. Nothing sent.");
+    if (!alive(ctx)) return;
+    const thread = createRequestThread(suggestedThreadTitle({ body: text, filePath: "" }));
+    ctx.panes.open("threads");
+    let binding: ThreadAgent | undefined;
+    try {
+      binding = await choose(ctx, thread, false);
+    } finally {
+      // A group that never got an agent has nothing to wait for.
+      if (!threadAgents.has(thread.id)) removeThreadGroup(thread.id);
+    }
+    if (!binding || !alive(ctx)) return;
+    const chosen = binding;
+    const payload = (agent: Pane) => {
+      const current = threadForBinding(chosen) ?? thread;
+      const author = groupAuthor(agent.name || agent.agent || "agent", current.title);
+      requestAuthors.set(author, thread.id);
+      return buildRequestPrompt({ skill, skillRead: chosen.skillRead === skill, sessionId, cwd: ctx.cwd, title: current.title, author, request: text });
+    };
+    requestDraft = undefined;
+    watchDispatch(ctx, thread, chosen, payload, skill, () => { requestDraft ??= text; });
+    ctx.notify(`Sent to ${agentName(chosen)}: ${thread.title}. Its comments will gather in this group.`);
   }
   function agentName(binding: ThreadAgent): string {
     return binding.pane?.name || binding.pane?.agent || "starting agent";
@@ -321,7 +390,7 @@ export default function register(hunk: HunkExtensionAPI) {
     if (target !== "hunk") void binding.bridge.notify(`Hunk · ${agentName(binding)}`, message, outcome === "done" ? "done" : "request");
   }
   /** Follows one dispatched prompt to completion outside the command that sent it. */
-  function watchDispatch(ctx: Context, thread: ReviewThread, binding: ThreadAgent, payload: (agent: Pane) => string, draft: string | undefined, skill: string): void {
+  function watchDispatch(ctx: Context, thread: ReviewThread, binding: ThreadAgent, payload: (agent: Pane) => string, skill: string, restoreDraft: () => void): void {
     const endSending = beginDispatch(thread.id);
     // The text is on its way: a second P during the turn starts from an empty prompt.
     drafts.delete(thread.id);
@@ -341,7 +410,7 @@ export default function register(hunk: HunkExtensionAPI) {
         }
       } catch (error) {
         // A failed hand-off keeps the typed request available for the retry.
-        if (draft && !drafts.has(thread.id)) drafts.set(thread.id, draft);
+        restoreDraft();
         setThreadAttention(thread.id, "failed");
         announce(ctx, binding, "attention", `${thread.title} needs attention: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
@@ -622,6 +691,7 @@ export default function register(hunk: HunkExtensionAPI) {
   command("help", "Herdr: toggle Threads keybindings", showThreadHelp, { needsHerdr: false });
   command("models", "Herdr: configure Pi/Claude model defaults…", configureModels, { key: "ctrl+l", needsHerdr: false });
   command("prompt", "Herdr: prompt the Threads group…", prompt, { key: "P" });
+  command("request", "Herdr: ask an agent; its comments form a new group…", request, { key: "I" });
   command("status", "Herdr: check the Threads group agent", refresh);
   command("reveal", "Herdr: reveal the Threads group agent", reveal);
   command("hide", "Herdr: hide siblings / zoom Hunk", ctx => client(ctx).zoom(true));
@@ -651,6 +721,7 @@ export default function register(hunk: HunkExtensionAPI) {
     recordReviewNote(kind, note);
     if (kind !== "removed") {
       updateThreadCommentNavigation(note.id, note.anchor);
+      if (fileAgentComment(note, requestAuthors.get(note.author ?? "")) && kind === "created") ctx.panes.open("threads");
       return;
     }
     // Resolving from the review, not the pane, reaches the board only through here.

@@ -181,9 +181,16 @@ export function shownResolution(note: ExtensionReviewSnapshotNote, snapshot: Ext
   return snapshot.files.some(file => file.fileKey === note.fileKey) ? note.resolution : "orphaned";
 }
 
+/** The one line a saved note sits on: the side Hunk prefers, else the first line of a range. */
+export function preferredLine(anchor: ExtensionReviewSnapshotNote["anchor"]): LineAddress | undefined {
+  return anchor.preferred
+    ?? (anchor.newRange ? { side: "new", line: anchor.newRange[0] } : undefined)
+    ?? (anchor.oldRange ? { side: "old", line: anchor.oldRange[0] } : undefined);
+}
+
 /**
  * Each requested root comment's conversation as the agent should read it: the
- * root, then its replies in saved order. Roots Hunk no longer renders, or no
+ * root, then its replies in the order they were saved. Roots Hunk no longer renders, or no
  * longer holds, are returned as skipped rather than sent.
  */
 export function conversationsForPrompt(snapshot: ExtensionReviewSnapshot, rootIds: readonly string[]): { conversations: PromptConversation[]; skipped: string[] } {
@@ -193,11 +200,14 @@ export function conversationsForPrompt(snapshot: ExtensionReviewSnapshot, rootId
   const skipped: string[] = [];
   for (const id of rootIds) {
     const root = byId.get(id);
-    const at = root && (root.anchor.preferred
-      ?? (root.anchor.newRange ? { side: "new" as const, line: root.anchor.newRange[0] } : undefined)
-      ?? (root.anchor.oldRange ? { side: "old" as const, line: root.anchor.oldRange[0] } : undefined));
+    const at = root && preferredLine(root.anchor);
     if (!root || shownResolution(root, snapshot) === "orphaned" || !at) { skipped.push(id); continue; }
-    const notes = snapshot.notes.filter(note => shownResolution(note, snapshot) !== "orphaned" && rootId(note, byId) === root.id);
+    // The snapshot lists agent notes before the user's, whenever either was saved, so
+    // the conversation is put in order by time: the root, then replies as they came.
+    const notes = snapshot.notes
+      .filter(note => shownResolution(note, snapshot) !== "orphaned" && rootId(note, byId) === root.id)
+      .sort((left, right) => (left.id === root.id ? -1 : right.id === root.id ? 1 : 0)
+        || (left.createdAt ?? "").localeCompare(right.createdAt ?? ""));
     conversations.push({
       replyTo: root.id,
       filePath: paths.get(root.fileKey) ?? root.fileKey,
@@ -208,6 +218,7 @@ export function conversationsForPrompt(snapshot: ExtensionReviewSnapshot, rootId
         from: note.source === "user" ? "user" : note.author || "agent",
         text: [note.summary, note.rationale].filter(Boolean).join("\n"),
       })),
+      answered: notes.at(-1)?.source !== "user",
     });
   }
   return { conversations, skipped };

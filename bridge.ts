@@ -57,6 +57,8 @@ export interface PromptConversation {
   readonly stale: boolean;
   /** Root first, then its replies in the order they were saved. */
   readonly messages: readonly { readonly from: string; readonly text: string }[];
+  /** The latest message is an agent's, so nothing in this conversation awaits a reply. */
+  readonly answered: boolean;
 }
 
 export interface GroupPrompt {
@@ -73,6 +75,18 @@ export interface GroupPrompt {
   readonly guidance?: string;
 }
 
+/** A free-form request that starts a group of its own, before any comment exists. */
+export interface RequestPrompt {
+  readonly skill: string;
+  readonly skillRead: boolean;
+  readonly sessionId: string;
+  readonly cwd: string;
+  readonly title: string;
+  /** The exact comment author Threads files this request's comments by. */
+  readonly author: string;
+  readonly request: string;
+}
+
 function indent(text: string): string {
   return text.split(/\r?\n/).join("\n     ");
 }
@@ -81,32 +95,81 @@ function indent(text: string): string {
  * The prompt a group's agent receives. Command syntax is left to the Hunk skill,
  * which updates with Hunk; this text holds only the task, its rules and data.
  */
-export function buildPrompt(prompt: GroupPrompt): string {
-  const conversations = prompt.conversations.map((conversation, index) => [
-    `${index + 1}. reply to: ${conversation.replyTo} — ${conversation.filePath}, ${conversation.side} line ${conversation.line}`
-      + (conversation.stale ? " (stale: the code at this line has changed since it was written)" : ""),
-    ...conversation.messages.map(message => `   ${message.from}: ${indent(message.text)}`),
-  ].join("\n"));
+function preamble(prompt: { skill: string; skillRead: boolean; sessionId: string; cwd: string }, answer: string): string[] {
   return [
-    "You're helping with a live Hunk code review from a background Herdr pane that nobody is watching. Don't wait for input here; anything you need to say goes in a review reply.",
+    `You're helping with a live Hunk code review from a background Herdr pane that nobody is watching. Don't wait for input here; anything you need to say goes in ${answer}.`,
     prompt.skillRead
       ? `You've already read the Hunk review skill at ${JSON.stringify(prompt.skill)}; read it again if it's no longer in your context.`
       : `Before starting, read the Hunk review skill at ${JSON.stringify(prompt.skill)}; it documents the \`hunk session\` commands.`,
     `Use session ${JSON.stringify(prompt.sessionId)} as the session selector for every \`hunk session\` command. Review working directory: ${JSON.stringify(prompt.cwd)}; your own cwd may differ.`,
+  ];
+}
+
+function listConversation(conversation: PromptConversation, index: number): string {
+  return [
+    `${index + 1}. reply to: ${conversation.replyTo} — ${conversation.filePath}, ${conversation.side} line ${conversation.line}`
+      + (conversation.stale ? " (stale: the code at this line has changed since it was written)" : ""),
+    ...conversation.messages.map(message => `   ${message.from}: ${indent(message.text)}`),
+  ].join("\n");
+}
+
+/**
+ * Only a conversation whose latest message is the user's is put to the agent. One it
+ * already answered is shown as context when typed guidance may refer to it, and is
+ * otherwise left out, so a re-prompt never has the agent answer its own reply.
+ */
+export function buildPrompt(prompt: GroupPrompt): string {
+  const pending = prompt.conversations.filter(conversation => !conversation.answered);
+  const answered = prompt.conversations.filter(conversation => conversation.answered);
+  const context = prompt.guidance ? answered : [];
+  const task = pending.length
+    ? [
+      `Task: answer each review conversation listed under "Awaiting a reply", from the group ${JSON.stringify(prompt.title)}, with a reply in that conversation.`,
+      "- Use each conversation's reply-to ID exactly as written; it is the only comment you may reply to in that conversation.",
+      "- Answer the user's latest message in each conversation; earlier messages are history. Never reply to your own or another agent's message.",
+      `- Only the conversations under "Awaiting a reply" are in scope.${context.length ? " Conversations under \"Already answered\" are context: reply there only if the user's guidance below asks for it." : ""} Don't reply to or start any other comment, and never resolve or delete a comment.`,
+    ]
+    : [
+      `Task: carry out the user's guidance below for the group ${JSON.stringify(prompt.title)}. Every conversation in it already has your reply; they are listed as context.`,
+      "- Reply only where the guidance asks you to, once per conversation it concerns, using that conversation's reply-to ID exactly as written.",
+      "- Don't reply to or start any other comment, and never resolve or delete a comment.",
+    ];
+  return [
+    ...preamble(prompt, "a review reply"),
     "",
-    `Task: answer each review conversation listed below, from the group ${JSON.stringify(prompt.title)}, with a reply in that conversation.`,
-    "- Use each conversation's reply-to ID exactly as written; it is the only comment you may reply to in that conversation.",
-    "- Only the listed conversations are in scope. Don't reply to or start any other comment, and never resolve or delete a comment.",
+    ...task,
     "- Don't edit files unless the user's guidance below explicitly asks you to. Where a fix is warranted, describe it or include a short patch in the reply.",
     "- If a comment is unclear, reply with a specific question and move on. If a reply fails because its comment no longer exists, skip it.",
     "- Don't move the user's view, highlight code, reload the review, launch the Hunk TUI, restart the Hunk daemon, or change Herdr focus or zoom.",
     `- Set the reply author to ${JSON.stringify(prompt.author)}.`,
-    "- Finish your turn once every listed conversation has a reply.",
+    pending.length ? "- Finish your turn once every conversation awaiting a reply has one." : "- Finish your turn once the guidance is done.",
+    "- Where the skill's general guidance conflicts with these rules, these rules win.",
+    ...(pending.length ? ["", "Awaiting a reply (the complete list):", ...pending.map(listConversation)] : []),
+    ...(context.length ? ["", "Already answered (context only):", ...context.map(listConversation)] : []),
+    ...(prompt.guidance ? ["", "Additional guidance from the user:", prompt.guidance] : []),
+  ].join("\n");
+}
+
+/**
+ * The prompt for a request typed with no comment to answer. The agent reports back in
+ * new root comments, and the author it sets on them is how Threads files every one
+ * under the request's group.
+ */
+export function buildRequestPrompt(prompt: RequestPrompt): string {
+  return [
+    ...preamble(prompt, "a review comment"),
+    "",
+    `Task: carry out the user's request below, for the Threads group ${JSON.stringify(prompt.title)}.`,
+    "- Report what you find or change as new review comments, one per point, each on the line it concerns. A comment can only sit on a line the review shows; if you change files, the review reloads to show them.",
+    `- Set the author of every comment to ${JSON.stringify(prompt.author)}, exactly. That is how Threads files your comments under this request.`,
+    "- Don't reply to, resolve or delete any existing comment.",
+    "- Edit files only if the request asks for changes.",
+    "- Don't move the user's view, highlight code, reload the review, launch the Hunk TUI, restart the Hunk daemon, or change Herdr focus or zoom.",
+    "- If nothing warrants a comment, leave none. Finish your turn once the request is done.",
     "- Where the skill's general guidance conflicts with these rules, these rules win.",
     "",
-    "Conversations (the complete list):",
-    ...conversations,
-    ...(prompt.guidance ? ["", "Additional guidance from the user:", prompt.guidance] : []),
+    "Request from the user:",
+    prompt.request,
   ].join("\n");
 }
 
