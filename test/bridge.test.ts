@@ -6,7 +6,10 @@ const caller: Pane = { pane_id: "w6:p1", workspace_id: "w6", tab_id: "w6:t1", te
 const agent: Pane = { ...caller, pane_id: "w6:p2", terminal_id: "agent", agent: "pi", agent_status: "idle", name: "reviewer" };
 const env = { HERDR_ENV: "1", HERDR_PANE_ID: "old-caller-id" };
 
-function fixture(settleResize?: () => Promise<void>) {
+/** The tab Herdr creates for a temporary agent, beside Hunk's own. */
+const agentTab = "w6:t2";
+
+function fixture() {
   const calls: string[][] = [];
   let agents = [agent];
   let pane = { ...agent };
@@ -17,18 +20,20 @@ function fixture(settleResize?: () => Promise<void>) {
     const command = args.slice(0, 2).join(" ");
     if (command === "pane current") result = { pane: caller };
     else if (command === "agent list") result = { agents };
-    else if (command === "pane layout") result = { layout: { zoomed: false, focused_pane_id: caller.pane_id, area: { width: 160, height: 40 } } };
-    else if (command === "pane split") result = { pane: { ...pane, agent: undefined, name: undefined } };
+    else if (command === "tab create") {
+      pane = { ...pane, tab_id: agentTab, agent: undefined, name: undefined };
+      result = { tab: { tab_id: agentTab }, root_pane: pane };
+    }
     else if (command === "pane get") result = { pane };
     else if (command === "agent start") {
       if (startFails) throw new Error("agent_not_ready");
-      pane = { ...agent, name: args[2] };
+      pane = { ...agent, tab_id: agentTab, name: args[2] };
       agents = [pane];
     }
     return JSON.stringify({ result });
   };
   return {
-    bridge: new Bridge("/review with spaces", exec, env, settleResize ?? (async () => {})), calls,
+    bridge: new Bridge("/review with spaces", exec, env), calls,
     agents(value: Pane[]) { agents = value; }, pane(value: Pane) { pane = value; },
     failStart() { startFails = true; },
   };
@@ -49,19 +54,17 @@ test("outside Herdr fails before executing any CLI", async () => {
   assert.equal(calls, 0);
 });
 
-test("spawn splits before zooming once, preserves cwd/focus and registers owned pane", async () => {
+test("spawn starts the agent in a new unfocused tab of Hunk's workspace, never splitting or zooming Hunk", async () => {
   const f = fixture();
-  const result = await f.bridge.spawn("pi");
-  const split = f.calls.findIndex(a => a[1] === "split");
-  const zoom = f.calls.findIndex(a => a[1] === "zoom");
+  const result = await f.bridge.spawn("pi", undefined, "hunk · Authentication");
+  const tab = f.calls.findIndex(a => a[0] === "tab" && a[1] === "create");
   const start = f.calls.findIndex(a => a[0] === "agent" && a[1] === "start");
-  assert.ok(zoom > split);
-  assert.ok(start > zoom);
-  assert.deepEqual(f.calls.filter(a => a[1] === "zoom"), [["pane", "zoom", caller.pane_id, "--on"]]);
-  assert.deepEqual(f.calls[split], ["pane", "split", caller.pane_id, "--direction", "right", "--cwd", "/review with spaces", "--no-focus"]);
+  assert.deepEqual(f.calls[tab], ["tab", "create", "--workspace", caller.workspace_id, "--cwd", "/review with spaces", "--label", "hunk · Authentication", "--no-focus"]);
+  assert.ok(start > tab);
+  assert.equal(f.calls.some(a => a[1] === "split" || a[1] === "zoom" || a[1] === "focus"), false);
   assert.equal(result.pane_id, agent.pane_id);
+  assert.equal(result.tab_id, agentTab);
   assert.match(f.bridge.owned!.name, /^hunk-[a-f0-9]{8}$/);
-  assert.equal(f.calls.some(a => a[1] === "focus"), false);
   await assert.rejects(f.bridge.spawn("pi"), /already exists/);
 });
 
@@ -72,30 +75,13 @@ test("spawn forwards a configured model only as agent CLI arguments", async () =
   assert.deepEqual(start!.slice(-3), ["--", "--model", "anthropic/claude-sonnet-4-5"]);
 });
 
-test("spawn waits for the split resize to settle before zooming or starting the agent", async () => {
-  let resume!: () => void;
-  let reached!: () => void;
-  const reachedBarrier = new Promise<void>(resolve => { reached = resolve; });
-  const barrier = new Promise<void>(resolve => { resume = resolve; });
-  const f = fixture(async () => { reached(); await barrier; });
-  const spawning = f.bridge.spawn("pi");
-  await reachedBarrier;
-  assert.ok(f.bridge.owned, "track the pane before waiting so cleanup can find it");
-  assert.ok(f.calls.some(a => a[1] === "split"));
-  assert.equal(f.calls.some(a => a[1] === "zoom" || a[1] === "start"), false);
-  resume();
-  await spawning;
-  assert.ok(f.calls.some(a => a[1] === "zoom"));
-  assert.ok(f.calls.some(a => a[1] === "start"));
-});
-
 test("startup failure retains owned pane for reveal/cleanup and never prompts", async () => {
   const f = fixture(); f.failStart();
   await assert.rejects(f.bridge.spawn("pi"), /No prompt was sent/);
   assert.ok(f.bridge.owned);
   assert.equal(f.calls.some(a => a[1] === "prompt"), false);
   await f.bridge.revealOwned();
-  assert.deepEqual(f.calls.at(-1), ["pane", "zoom", caller.pane_id, "--off"]);
+  assert.deepEqual(f.calls.at(-1), ["tab", "focus", agentTab]);
 });
 
 test("prompt is one argv value, not shell text; no completion wait", async () => {
@@ -132,6 +118,15 @@ test("reveal is explicit, unzooms before agent focus", async () => {
   assert.deepEqual(f.calls.slice(-2), [["pane", "zoom", caller.pane_id, "--off"], ["agent", "focus", agent.pane_id]]);
 });
 
+test("reveal of an agent in another tab focuses it without touching Hunk's zoom", async () => {
+  const f = fixture();
+  const other = { ...agent, tab_id: agentTab };
+  f.agents([other]);
+  await f.bridge.reveal(other);
+  assert.equal(f.calls.some(a => a[1] === "zoom"), false);
+  assert.deepEqual(f.calls.at(-1), ["agent", "focus", agent.pane_id]);
+});
+
 test("cleanup only closes owned same-identity agents", async () => {
   const f = fixture();
   await f.bridge.stop();
@@ -143,7 +138,7 @@ test("cleanup only closes owned same-identity agents", async () => {
 });
 
 test("cleanup refuses replaced agents and moved panes", async () => {
-  for (const change of [{ name: "other" }, { workspace_id: "w9" }, { tab_id: "w6:t2" }, { terminal_id: "other" }]) {
+  for (const change of [{ name: "other" }, { workspace_id: "w9" }, { tab_id: "w6:t3" }, { terminal_id: "other" }]) {
     const f = fixture();
     const spawned = await f.bridge.spawn("pi");
     f.agents([{ ...spawned, ...change }]); f.pane({ ...spawned, ...change });
@@ -172,6 +167,9 @@ test("group prompt carries the skill path, exact session and every reply-to ID, 
   assert.match(payload, /never resolve or delete a comment/);
   assert.match(payload, /Don't edit files unless the user's guidance below explicitly asks you to/);
   assert.match(payload, /Set the reply author to "hunk-pi"/);
+  assert.match(payload, /The user reads your work only in the Hunk review, never in this session/);
+  assert.match(payload, /a message written only here is lost/);
+  assert.match(payload, /reply in that conversation with the specific question or blocker/);
   assert.match(payload, /these rules win/);
 });
 

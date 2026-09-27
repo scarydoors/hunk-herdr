@@ -99,7 +99,7 @@ function cursorAt(line: number | null): ExtensionReviewSelection {
 
 test("registers discoverable commands and diagnostic CLI without requiring status-row API", () => {
   const h = host();
-  assert.deepEqual([...h.commands.keys()], ["menu", "threads", "focus-threads", "pick", "help", "models", "prompt", "request", "status", "reveal", "hide", "stop", "resolve-thread", "reassign-thread-group"]);
+  assert.deepEqual([...h.commands.keys()], ["menu", "threads", "focus-threads", "pick", "help", "models", "prompt", "request", "status", "reveal", "stop", "resolve-thread", "reassign-thread-group"]);
   assert.equal(h.state.cliRegistered, true);
   assert.equal(h.state.paneRegistered, true);
   assert.equal(h.state.keyboardModeRegistered, true);
@@ -310,7 +310,6 @@ test("closes a temporary agent once the last comment of its group is resolved", 
   });
   t.mock.method(Bridge.prototype, "caller", async () => caller);
   t.mock.method(Bridge.prototype, "agents", async () => []);
-  t.mock.method(Bridge.prototype, "layout", async () => ({ zoomed: true, focused_pane_id: caller.pane_id, area: { width: 100, height: 40 } }));
   t.mock.method(Bridge.prototype, "spawn", async () => agent);
   const stop = t.mock.method(Bridge.prototype, "stop", async () => {});
   const h = host();
@@ -515,7 +514,6 @@ test("opens the prompt immediately while a new temporary agent is starting", asy
   let finishSpawn!: (pane: Pane) => void;
   t.mock.method(Bridge.prototype, "caller", async () => caller);
   t.mock.method(Bridge.prototype, "agents", async () => []);
-  t.mock.method(Bridge.prototype, "layout", async () => ({ zoomed: true, focused_pane_id: caller.pane_id, area: { width: 100, height: 40 } }));
   t.mock.method(Bridge.prototype, "spawn", () => new Promise<Pane>(resolve => { finishSpawn = resolve; }));
   const h = host();
   h.focus();
@@ -548,7 +546,6 @@ test("the default agent is the first picker row and starts without a kind dialog
   createThread("Authentication", authNote);
   t.mock.method(Bridge.prototype, "caller", async () => caller);
   t.mock.method(Bridge.prototype, "agents", async () => [agent, { ...agent, pane_id: "w1:p3", agent: "codex" }]);
-  t.mock.method(Bridge.prototype, "layout", async () => ({ zoomed: true, focused_pane_id: caller.pane_id, area: { width: 100, height: 40 } }));
   const spawn = t.mock.method(Bridge.prototype, "spawn", async () => ({ ...agent, agent: "claude" }));
   const h = host({ agents: ["pi", "claude"], default_agent: "claude" });
   h.focus();

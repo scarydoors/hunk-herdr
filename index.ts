@@ -89,7 +89,6 @@ export default function register(hunk: HunkExtensionAPI) {
   let requestDraft: string | undefined;
   let disposed = false;
   let pending: Promise<void> | undefined;
-  let originallyZoomed: boolean | undefined;
   let modelDefaults = loadModelDefaults();
 
   function client(ctx: Context): Bridge {
@@ -245,13 +244,9 @@ export default function register(hunk: HunkExtensionAPI) {
         if (!kind) throw new Error("Agent type is not enabled.");
       }
       thread = promoted(thread);
-      const caller = await api.caller();
-      const layout = await api.layout(caller);
-      if (!alive(ctx)) return;
-      originallyZoomed ??= layout.zoomed;
       const endStarting = beginDispatch(thread.id);
       const model = isConfigurableAgentKind(kind) ? modelDefaults[kind] : undefined;
-      const ready = api.spawn(kind, model).finally(endStarting);
+      const ready = api.spawn(kind, model, `hunk · ${thread.title}`).finally(endStarting);
       // Attach a handler now: the user may cancel the prompt before startup finishes,
       // so a failed start is marked on the group even when no prompt follows it.
       void ready.catch(() => setThreadAttention(thread.id, "startup failed"));
@@ -262,7 +257,7 @@ export default function register(hunk: HunkExtensionAPI) {
       void ready.then(pane => { if (threadAgents.get(thread.id) === starting) bindAgent(thread.id, starting, pane.name || pane.agent || kind); }, () => {});
       if (waitForReady) {
         await readyAgent(binding);
-        if (alive(ctx)) ctx.notify(`Temporary agent ready for ${thread.title}. Hunk stays zoomed; use Reveal to see it.`);
+        if (alive(ctx)) ctx.notify(`Temporary agent ready for ${thread.title} in its own Herdr tab; use Reveal to see it.`);
       }
     } else {
       const pane = await api.validate(agents[options.indexOf(picked)]!);
@@ -418,6 +413,16 @@ export default function register(hunk: HunkExtensionAPI) {
       }
     })();
   }
+  async function revealAgent(thread: ReviewThread): Promise<void> {
+    const binding = threadAgent(thread);
+    if (!binding) return;
+    // A temporary agent whose startup failed has no agent to focus yet, only its tab.
+    const pane = await readyAgent(binding).catch(error => { if (binding.owned && binding.bridge.owned) return undefined; throw error; });
+    if (pane) await binding.bridge.reveal(pane);
+    else await binding.bridge.revealOwned();
+    // Seeing the agent is how a blocked one gets unblocked.
+    setThreadAttention(thread.id, undefined);
+  }
   async function refresh(ctx: Context): Promise<void> {
     const thread = selectedGroup(ctx);
     const binding = thread && threadAgent(thread);
@@ -429,9 +434,7 @@ export default function register(hunk: HunkExtensionAPI) {
     const thread = selectedGroup(ctx);
     const binding = thread && threadAgent(thread);
     if (!thread || !binding) { await choose(ctx, thread); return; }
-    await binding.bridge.reveal(await readyAgent(binding));
-    // Seeing the agent is how a blocked one gets unblocked.
-    setThreadAttention(thread.id, undefined);
+    await revealAgent(thread);
   }
   async function stop(ctx: Context): Promise<void> {
     const thread = selectedGroup(ctx);
@@ -622,7 +625,7 @@ export default function register(hunk: HunkExtensionAPI) {
   async function menu(ctx: Context): Promise<void> {
     const thread = selectedGroup(ctx);
     if (!thread) return;
-    const actions = ["Choose agent…", "Prompt agent…", "Check agent status", "Reveal thread agent", "Hide siblings / zoom Hunk", "Stop temporary agent…", "Leave unchanged"];
+    const actions = ["Choose agent…", "Prompt agent…", "Check agent status", "Reveal thread agent", "Stop temporary agent…", "Leave unchanged"];
     const picked = await ctx.dialogs.select({ title: `Herdr · ${thread.title}`, options: actions });
     if (!picked || !alive(ctx)) return;
     switch (actions.indexOf(picked)) {
@@ -630,8 +633,7 @@ export default function register(hunk: HunkExtensionAPI) {
       case 1: return prompt(ctx);
       case 2: return refresh(ctx);
       case 3: return reveal(ctx);
-      case 4: return client(ctx).zoom(true);
-      case 5: return stop(ctx);
+      case 4: return stop(ctx);
     }
   }
   interface CommandOptions {
@@ -694,7 +696,6 @@ export default function register(hunk: HunkExtensionAPI) {
   command("request", "Herdr: ask an agent; its comments form a new group…", request, { key: "I" });
   command("status", "Herdr: check the Threads group agent", refresh);
   command("reveal", "Herdr: reveal the Threads group agent", reveal);
-  command("hide", "Herdr: hide siblings / zoom Hunk", ctx => client(ctx).zoom(true));
   command("stop", "Herdr: stop the Threads group agent…", stop);
   // Resolving is about review state, not agent work, so it runs while an agent is busy.
   command("resolve-thread", "Herdr: resolve review thread", resolveThread, { key: "X", needsHerdr: false, whilePending: true });
@@ -739,12 +740,5 @@ export default function register(hunk: HunkExtensionAPI) {
     await Promise.all(owned.map(async binding => {
       try { await binding.bridge.stop(); } catch (error) { hunk.log(`Temporary pane cleanup: ${String(error)}`); }
     }));
-    if (originallyZoomed === false && owned[0]) {
-      try {
-        const caller = await owned[0].bridge.caller();
-        const layout = await owned[0].bridge.layout(caller);
-        if (layout.zoomed && layout.focused_pane_id === caller.pane_id) await owned[0].bridge.zoom(false);
-      } catch {}
-    }
   });
 }

@@ -2,7 +2,6 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { AGENT_KINDS } from "./config.ts";
 import { sessionIdForGeneration } from "./threads.ts";
-import { setTimeout as delay } from "node:timers/promises";
 
 export type Run = (binary: string, args: string[], cwd: string, timeout?: number) => Promise<string>;
 export const run: Run = (binary, args, cwd, timeout = 15_000) => new Promise((resolve, reject) => {
@@ -26,11 +25,6 @@ export interface Pane {
   agent_session?: { kind: string; value: string };
   cwd?: string;
   foreground_cwd?: string;
-}
-export interface Layout {
-  zoomed: boolean;
-  focused_pane_id: string;
-  area: { width: number; height: number };
 }
 export interface Owned { pane: Pane; name: string }
 
@@ -97,7 +91,10 @@ function indent(text: string): string {
  */
 function preamble(prompt: { skill: string; skillRead: boolean; sessionId: string; cwd: string }, answer: string): string[] {
   return [
-    `You're helping with a live Hunk code review from a background Herdr pane that nobody is watching. Don't wait for input here; anything you need to say goes in ${answer}.`,
+    `You're helping with a live Hunk code review. This is a new task, whatever this session discussed before.`,
+    // An agent the user picked has its own chat history, and answering in it is its habit;
+    // said plainly, a message left only here is one the user never reads.
+    `The user reads your work only in the Hunk review, never in this session. Everything you have to say, answers, questions and blockers alike, goes in ${answer} made with \`hunk session\`; a message written only here is lost. Don't wait for input here.`,
     prompt.skillRead
       ? `You've already read the Hunk review skill at ${JSON.stringify(prompt.skill)}; read it again if it's no longer in your context.`
       : `Before starting, read the Hunk review skill at ${JSON.stringify(prompt.skill)}; it documents the \`hunk session\` commands.`,
@@ -139,7 +136,7 @@ export function buildPrompt(prompt: GroupPrompt): string {
     "",
     ...task,
     "- Don't edit files unless the user's guidance below explicitly asks you to. Where a fix is warranted, describe it or include a short patch in the reply.",
-    "- If a comment is unclear, reply with a specific question and move on. If a reply fails because its comment no longer exists, skip it.",
+    "- If a comment is unclear, or something stops you acting on it (a decision, information or access you don't have), reply in that conversation with the specific question or blocker and move on. If a reply fails because its comment no longer exists, skip it.",
     "- Don't move the user's view, highlight code, reload the review, launch the Hunk TUI, restart the Hunk daemon, or change Herdr focus or zoom.",
     `- Set the reply author to ${JSON.stringify(prompt.author)}.`,
     pending.length ? "- Finish your turn once every conversation awaiting a reply has one." : "- Finish your turn once the guidance is done.",
@@ -165,6 +162,7 @@ export function buildRequestPrompt(prompt: RequestPrompt): string {
     "- Don't reply to, resolve or delete any existing comment.",
     "- Edit files only if the request asks for changes.",
     "- Don't move the user's view, highlight code, reload the review, launch the Hunk TUI, restart the Hunk daemon, or change Herdr focus or zoom.",
+    "- If a question or blocker stops you, leave it as a comment on the most relevant line rather than asking here.",
     "- If nothing warrants a comment, leave none. Finish your turn once the request is done.",
     "- Where the skill's general guidance conflicts with these rules, these rules win.",
     "",
@@ -178,13 +176,10 @@ export class Bridge {
   readonly cwd: string;
   readonly exec: Run;
   readonly env: NodeJS.ProcessEnv;
-  readonly settleResize: () => Promise<void>;
-  constructor(cwd: string, exec: Run = run, env: NodeJS.ProcessEnv = process.env,
-    settleResize: () => Promise<void> = () => delay(200)) {
+  constructor(cwd: string, exec: Run = run, env: NodeJS.ProcessEnv = process.env) {
     this.cwd = cwd;
     this.exec = exec;
     this.env = env;
-    this.settleResize = settleResize;
   }
 
   async api<T>(args: string[], timeout?: number): Promise<T> {
@@ -208,33 +203,23 @@ export class Bridge {
     if (!current) throw new Error("Agent exited, moved, or changed identity. Pick an agent again.");
     return current;
   }
-  async layout(caller: Pane): Promise<Layout> {
-    return (await this.api<{ layout: Layout }>(["pane", "layout", "--pane", caller.pane_id])).layout;
-  }
   async zoom(on: boolean): Promise<void> {
     const caller = await this.caller();
     await this.api(["pane", "zoom", caller.pane_id, on ? "--on" : "--off"]);
   }
-  async spawn(kind: string, model?: string): Promise<Pane> {
+  /**
+   * Starts a temporary agent in a Herdr tab of its own, beside Hunk's tab in the same
+   * workspace and without taking focus, so Hunk's layout is never split or zoomed.
+   */
+  async spawn(kind: string, model?: string, label?: string): Promise<Pane> {
     if (this.owned) throw new Error("A temporary pane already exists. Stop it before creating another.");
     if (!(AGENT_KINDS as readonly string[]).includes(kind)) throw new Error("Unsupported agent kind");
     const caller = await this.caller();
-    const layout = await this.layout(caller);
-    // Splitting clears Herdr's zoom. Create the sibling first, then zoom Hunk
-    // once, rather than zooming immediately before Herdr undoes it.
-    const { pane } = await this.api<{ pane: Pane }>([
-      "pane", "split", caller.pane_id, "--direction", layout.area.width >= layout.area.height * 2.5 ? "right" : "down",
-      "--cwd", this.cwd, "--no-focus",
-    ]);
     const name = `hunk-${randomUUID().slice(0, 8)}`;
+    const { root_pane: pane } = await this.api<{ root_pane: Pane }>([
+      "tab", "create", "--workspace", caller.workspace_id, "--cwd", this.cwd, "--label", label || name, "--no-focus",
+    ]);
     this.owned = { pane, name }; // Track immediately, including blocked/failed startups.
-    // OpenTUI 0.5.6 debounces terminal resize by 100 ms and ignores a resize
-    // back to its cached dimensions. An immediate split -> zoom can therefore
-    // lose terminal cells without invalidating Hunk's render buffer. Let the
-    // smaller layout settle before restoring full size. This is a timing
-    // workaround, not a renderer acknowledgement; keep it injectable for tests.
-    await this.settleResize();
-    await this.zoom(true);
     try {
       await this.api(["agent", "start", name, "--kind", kind, "--pane", pane.pane_id, "--timeout", "30000", ...(model ? ["--", "--model", model] : [])], 35_000);
       const agent = (await this.agents()).find(a => a.pane_id === pane.pane_id && a.terminal_id === pane.terminal_id);
@@ -242,7 +227,7 @@ export class Bridge {
       this.owned.pane = agent;
       return agent;
     } catch (error) {
-      throw new Error(`${error instanceof Error ? error.message : error}. Temporary pane ${pane.pane_id} retained; use Reveal temporary pane to handle startup or Stop temporary agent to discard it. No prompt was sent.`);
+      throw new Error(`${error instanceof Error ? error.message : error}. Temporary tab retained for pane ${pane.pane_id}; use Reveal to handle startup or Stop temporary agent to discard it. No prompt was sent.`);
     }
   }
   /** The one call that runs `hunk` rather than `herdr`; kept here so every child process is mockable in one place. */
@@ -263,15 +248,15 @@ export class Bridge {
     if (agent.tab_id === caller.tab_id) await this.zoom(false);
     await this.api(["agent", "focus", agent.pane_id]);
   }
+  /** Switches to the temporary agent's tab, including when its startup is blocked on a dialog. */
   async revealOwned(): Promise<void> {
     if (!this.owned) throw new Error("No temporary pane");
     const caller = await this.caller();
     const { pane } = await this.api<{ pane: Pane }>(["pane", "get", this.owned.pane.pane_id]);
-    if (pane.terminal_id !== this.owned.pane.terminal_id || pane.workspace_id !== caller.workspace_id || pane.tab_id !== caller.tab_id) {
+    if (pane.terminal_id !== this.owned.pane.terminal_id || pane.workspace_id !== caller.workspace_id || pane.tab_id !== this.owned.pane.tab_id) {
       throw new Error("Temporary pane moved or changed; manage it in Herdr.");
     }
-    // Leave focus on Hunk, but reveal the sibling even when agent startup was blocked.
-    await this.zoom(false);
+    await this.api(["tab", "focus", pane.tab_id]);
   }
   async stop(): Promise<void> {
     const owned = this.owned;
@@ -279,11 +264,12 @@ export class Bridge {
     const caller = await this.caller();
     const { pane } = await this.api<{ pane: Pane }>(["pane", "get", owned.pane.pane_id]);
     const occupant = (await this.agents()).find(a => a.pane_id === pane.pane_id);
-    if (pane.terminal_id !== owned.pane.terminal_id || pane.workspace_id !== caller.workspace_id || pane.tab_id !== caller.tab_id
+    if (pane.terminal_id !== owned.pane.terminal_id || pane.workspace_id !== caller.workspace_id || pane.tab_id !== owned.pane.tab_id
       || (pane.agent && occupant?.name !== owned.name)
       || (owned.pane.agent_session && occupant && !sameAgent(owned.pane, occupant))) {
       throw new Error("Temporary pane moved or changed occupant; refusing to close it. Manage it in Herdr.");
     }
+    // Its tab holds only this pane unless the user split it, and goes when the pane does.
     await this.api(["pane", "close", pane.pane_id]);
     this.owned = undefined;
   }

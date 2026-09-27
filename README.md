@@ -33,7 +33,7 @@ selected comment, and **P**, **A**, **Ctrl+R** and **X** act on the selected row
   the current line or hunk. Resolving works while an
   agent is still running; once a group's last comment is resolved the group is retired,
   and a temporary agent Herdr started for it is closed. Agents you picked keep running.
-- **Extensions → Herdr** commands also expose selection, status, reveal, hide,
+- **Extensions → Herdr** commands also expose selection, status, reveal,
   thread controls, and stopping the temporary agent. Menu grouping is named `hunk-herdr`.
 
 ## Threads interface experiment
@@ -110,7 +110,7 @@ placeholder: pressing Enter on an empty field asks the agent to reply to each of
 group's comments; typed text is sent as additional guidance on top of that task. A spinning indicator on a group means Herdr is starting its agent or
 sending it work; after Herdr observes its response, the indicator becomes a green
 checkmark. A red **!** means the agent needs you: it ended its turn `blocked` (a
-trust, login or permission prompt in its hidden pane), failed to start, or didn't
+trust, login or permission prompt in its background tab), failed to start, or didn't
 receive the prompt. The mark stays until you reveal the agent, prompt the group
 again, stop its agent, or resolve the group. A group row also names its agent
 (**· claude**), with **⌁** when it's a temporary agent this Hunk session started
@@ -150,23 +150,20 @@ The selection lasts for this Hunk process, not across restarts.
 Temporary agents support Pi, Claude, Codex, Gemini and OpenCode (the chosen CLI
 must already be installed and authenticated). Creation:
 
-1. Splits a sibling right/down based on available geometry, preserving the review
-   cwd and passing `--no-focus`.
-2. Waits 200 ms for Hunk's debounced resize handling, then zooms Hunk's Herdr
-   pane. Without this pause, a fast split/zoom can leave stale cells because
-   OpenTUI skips resizing when the dimensions return to their cached value.
-   This is a timing workaround, not a guaranteed repaint acknowledgement.
-3. Starts a uniquely named `hunk-…` agent and waits for Herdr's startup readiness.
+1. Creates a new Herdr tab in Hunk's workspace, labelled `hunk · <group>`, in the
+   review cwd and with `--no-focus`. Hunk's own tab is never split or zoomed.
+2. Starts a uniquely named `hunk-…` agent in that tab's pane and waits for Herdr's
+   startup readiness.
 
-This is a normal interactive agent hidden by zoom, **not a headless process**.
-**Reveal selected agent** unzooms the shared tab and focuses the agent.
-**Reveal temporary pane** just unzooms Hunk, including when startup is blocked by
-login/trust/approval UI. Neither startup nor prompting answers those dialogs.
-Switch back to Hunk and choose **Hide siblings / zoom Hunk** to hide it again.
+This is a normal interactive agent in a background tab, **not a headless process**.
+**Reveal thread agent** focuses the agent, switching to its tab; when startup is
+blocked by login/trust/approval UI it switches to the temporary tab instead. Neither
+startup nor prompting answers those dialogs. Switch back to Hunk's tab when done.
+An agent you picked that shares Hunk's tab is still revealed by unzooming Hunk first.
 
 Only one temporary pane is owned at a time. **Stop temporary agent** asks before
 closing it and terminating running work. Graceful Hunk shutdown also attempts to
-close the owned pane and restore the initial unzoomed state; that cleanup is
+close the owned pane, which removes its tab; that cleanup is
 best-effort because Hunk bounds shutdown time. A crash, force-kill, slow request,
 or moved/changed pane may leave it running. Use Herdr to manage any leftover
 `hunk-…` agent. Existing agents are never closed by this extension.
@@ -193,7 +190,9 @@ command syntax is left to Hunk's own review skill, which updates with Hunk:
   says how many.
 - The rules: reply only in the listed conversations; never resolve, delete or start
   comments; don't edit files unless your guidance asks; ask a question in the thread
-  when a comment is unclear rather than waiting in the hidden pane; don't move your
+  when a comment is unclear or something blocks the agent, rather than asking in its
+  session (the prompt says plainly that you read only the review, never the session,
+  which matters most for an agent you picked and have been chatting with); don't move your
   view, highlight, reload or restart the daemon; sign replies with the agent's name.
   Where the skill's general guidance disagrees, these rules win.
 - Your typed text, under **Additional guidance**, when you entered any.
@@ -312,7 +311,7 @@ The manifest and folder layout are ready to move into a separate git repository.
 Before publishing, choose a license, tag a release and add the `hunk-extension`
 GitHub topic. The required base Hunk extension API is 10.
 
-Tests cover workspace isolation, identity checks, split/zoom ordering, startup
+Tests cover workspace isolation, identity checks, tab creation, startup
 failure recovery, cancellation, stale reviews, concurrent actions, prompt
 construction and owned-pane cleanup. Actual TUI interaction and real agent
 startup should be smoke-tested manually in a disposable workspace.
