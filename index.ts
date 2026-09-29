@@ -568,7 +568,6 @@ export default function register(hunk: HunkExtensionAPI) {
     const thread = nearest && !busy && assignComment(nearest.id, note)
       ? threadBoardSnapshot().threads.find(candidate => candidate.id === nearest.id)!
       : assignUnassignedThread(note);
-    ctx.panes.open("threads");
     ctx.notify(busy
       ? `Added to ${thread.title} · ${busy.title} is working; Ctrl+R to move it there once it finishes`
       : `Added to ${thread.title} · Ctrl+T then P to prompt, Ctrl+R to move or name`);

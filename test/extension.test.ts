@@ -111,7 +111,7 @@ test("a saved comment lands in Unassigned without a dialog when its file has no 
   await h.emit("note_created", { note: authNote });
   assert.equal(h.options.length, 0, "no assignment dialog");
   assert.deepEqual(threadBoardSnapshot().threads.map(thread => [thread.title, thread.comments.length]), [["Unassigned", 1]]);
-  assert.deepEqual(h.openedPanes, ["threads"]);
+  assert.deepEqual(h.openedPanes, [], "saving a comment leaves the sidebar alone");
   assert.equal(h.notices.at(-1), "Added to Unassigned · Ctrl+T then P to prompt, Ctrl+R to move or name");
 });
 

@@ -51,7 +51,7 @@ running) the group is immutable: **Ctrl+R** won't move its comments out or offer
 as a destination, and a comment saved next to one of its comments stages in
 Unassigned instead of joining it. Once the agent finishes, move it in with **Ctrl+R**.
 Native replies remain in their root conversation and are never assigned. Saving a
-comment opens the right-hand Threads sidebar.
+comment leaves the Threads sidebar as it is; **T** shows it and **Ctrl+T** focuses it.
 
 Each thread can be expanded or collapsed by clicking its row or pressing Enter on it.
 Expanded threads list their assigned comments; clicking a comment navigates to its
